@@ -36,16 +36,11 @@ class BinaryNinjaMCP:
         self.config = Config()
         self.server = MCPServer(self.config)
 
-    def start_server(self, bv):
+    def start_server(self, bv=None):
         try:
             # Apply latest settings from Binary Ninja configuration
             _apply_settings_to_config()
 
-            # Require an active BinaryView (match menu behavior)
-            if bv is None:
-                bn.log_debug("MCP Max start requested but no BinaryView is active; deferring")
-                _show_no_bv_popup()
-                return
             # Avoid duplicate starts
             if self.server and self.server.server:
                 bn.log_info("MCP Max server already running; skip new start")
@@ -60,11 +55,12 @@ class BinaryNinjaMCP:
                         pass
                 _show_popup("MCP Server", "Server is already running.")
                 return
-            self.server.binary_ops.current_view = bv
-            try:
-                self.server.binary_ops.register_view(bv)
-            except Exception:
-                pass
+            if bv is not None:
+                self.server.binary_ops.current_view = bv
+                try:
+                    self.server.binary_ops.register_view(bv)
+                except Exception:
+                    pass
             self.server.start()
             global _mcp_user_stopped
             _mcp_user_stopped = False
@@ -758,6 +754,15 @@ bn.PluginCommand.register(
 )
 
 bn.log_info("Binary Ninja MCP plugin loaded successfully")
+
+# Auto-start MCP server on plugin load (no BinaryView required).
+# POST /load can then be used to open a binary remotely.
+try:
+    _apply_settings_to_config()
+    plugin.start_server(bv=None)
+    bn.log_info("MCP server auto-started on plugin load (no BinaryView yet)")
+except Exception as e:
+    bn.log_warn(f"MCP server auto-start on load failed: {e}")
 
 # Auto-start and settings UI removed
 
