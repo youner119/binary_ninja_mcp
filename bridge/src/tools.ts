@@ -938,6 +938,30 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
   );
 
   server.tool(
+    "load_binary",
+    "Load a binary file into Binary Ninja for analysis. Can also load .bndb files. " +
+    "Call this before any analysis if no binary is loaded (get_binary_status shows loaded=false).",
+    {
+      filepath: z.string().describe("Absolute path to the binary or .bndb file to load"),
+    },
+    async ({ filepath }) => {
+      const raw = await client.post("load", { filepath });
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return { content: [{ type: "text", text: raw.startsWith("Error") ? raw : `Binary loaded: ${filepath}` }] };
+      }
+      if (data.error) {
+        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
+      }
+      return {
+        content: [{ type: "text", text: `Binary loaded: ${filepath}` }],
+      };
+    }
+  );
+
+  server.tool(
     "list_binaries",
     "List managed/open binaries known to the server with ids and active flag.",
     {},
