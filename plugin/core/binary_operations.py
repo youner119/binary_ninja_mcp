@@ -45,11 +45,12 @@ class BinaryOperations:
             if bv is None:
                 raise Exception(f"bn.load returned None for {filepath}")
 
-            self._current_view = bv
+            # Register FIRST so _prune_views won't clear current_view
             try:
                 self._register_view(bv)
             except Exception:
                 pass
+            self._current_view = bv
 
             # Start analysis in the background (non-blocking)
             bv.update_analysis()

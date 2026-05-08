@@ -267,6 +267,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     "filename": self.binary_ops.current_view.file.filename
                     if self.binary_ops and self.binary_ops.current_view
                     else None,
+                    "debug_binary_ops_id": id(self.binary_ops) if self.binary_ops else None,
+                    "debug_current_view": str(self.binary_ops.current_view) if self.binary_ops else None,
                 }
                 self._send_json_response(status)
 
@@ -1919,9 +1921,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
 
                 try:
-                    self.binary_ops.load_binary(filepath)
+                    bv = self.binary_ops.load_binary(filepath)
                     self._send_json_response(
-                        {"success": True, "message": f"Binary loaded: {filepath}"}
+                        {
+                            "success": True,
+                            "message": f"Binary loaded: {filepath}",
+                            "debug_bv": str(bv),
+                            "debug_bv_is_none": bv is None,
+                            "debug_current_view_after": str(self.binary_ops.current_view),
+                            "debug_current_view_is_none": self.binary_ops.current_view is None,
+                            "debug_binary_ops_id": id(self.binary_ops),
+                        }
                     )
                 except Exception as e:
                     self._send_json_response({"error": str(e)}, 500)
