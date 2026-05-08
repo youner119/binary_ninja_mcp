@@ -38,46 +38,40 @@ class BinaryOperations:
             bn.log_info("Cleared current binary view")
 
     def load_binary(self, filepath: str) -> bn.BinaryView:
-        """Load a binary file using the appropriate method based on the Binary Ninja API version"""
-        try:
-            if hasattr(bn, "open_view"):
-                bn.log_info("Using bn.open_view method")
-                self._current_view = bn.open_view(filepath)
-            elif hasattr(bn, "BinaryViewType") and hasattr(bn.BinaryViewType, "get_view_of_file"):
-                bn.log_info("Using BinaryViewType.get_view_of_file method")
-                file_metadata = bn.FileMetadata()
-                try:
-                    if hasattr(bn.BinaryViewType, "get_default_options"):
-                        options = bn.BinaryViewType.get_default_options()
-                        self._current_view = bn.BinaryViewType.get_view_of_file(
-                            filepath, file_metadata, options
-                        )
-                    else:
-                        self._current_view = bn.BinaryViewType.get_view_of_file(
-                            filepath, file_metadata
-                        )
-                except TypeError:
-                    self._current_view = bn.BinaryViewType.get_view_of_file(filepath)
-            else:
-                bn.log_info("Using legacy method")
-                file_metadata = bn.FileMetadata()
-                binary_view_type = bn.BinaryViewType.get_view_of_file_with_options(
-                    filepath, file_metadata
-                )
-                if binary_view_type:
-                    self._current_view = binary_view_type.open()
-                else:
-                    raise Exception("No view type available for this file")
+        """Load a binary file using binaryninja.load() — the official API.
 
+        Called from the HTTP handler thread, so we dispatch to the main thread
+        via execute_on_main_thread_and_wait to avoid threading issues.
+        """
+        from binaryninja.mainthread import execute_on_main_thread_and_wait
+
+        result: list[bn.BinaryView | None] = [None]
+        error: list[Exception | None] = [None]
+
+        def _do_load():
             try:
-                if self._current_view is not None:
-                    self._register_view(self._current_view)
-            except Exception:
-                pass
-            return self._current_view
-        except Exception as e:
-            bn.log_error(f"Failed to load binary: {e}")
-            raise
+                bv = bn.load(filepath, update_analysis=True)
+                if bv is None:
+                    error[0] = Exception(f"bn.load returned None for {filepath}")
+                    return
+                result[0] = bv
+            except Exception as e:
+                error[0] = e
+
+        bn.log_info(f"Loading binary via bn.load: {filepath}")
+        execute_on_main_thread_and_wait(_do_load)
+
+        if error[0] is not None:
+            bn.log_error(f"Failed to load binary: {error[0]}")
+            raise error[0]
+
+        self._current_view = result[0]
+        try:
+            if self._current_view is not None:
+                self._register_view(self._current_view)
+        except Exception:
+            pass
+        return self._current_view
 
     # ---------------- Multi-binary helpers ----------------
     def _prune_views(self) -> None:
