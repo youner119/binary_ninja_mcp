@@ -81,6 +81,22 @@ class BinaryOperations:
                 fn = None
             if fn and fn not in new_fn_map:
                 new_fn_map[fn] = vid
+        # If current_view is alive but not yet tracked (e.g. loaded via API),
+        # re-register it so it survives pruning.
+        if self._current_view is not None:
+            cv_tracked = any(obj is self._current_view for obj in alive_objs)
+            if not cv_tracked:
+                cv_id = f"v{self._next_view_id}"
+                self._next_view_id += 1
+                alive[cv_id] = weakref.ref(self._current_view)
+                alive_objs.append(self._current_view)
+                try:
+                    fn = str(getattr(self._current_view.file, "filename", None)) if getattr(self._current_view, "file", None) else None
+                except Exception:
+                    fn = None
+                if fn and fn not in new_fn_map:
+                    new_fn_map[fn] = cv_id
+
         self._views_by_id = alive
         self._id_by_filename = new_fn_map
         # If current_view no longer exists among alive views, clear it
