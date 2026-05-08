@@ -38,40 +38,26 @@ class BinaryOperations:
             bn.log_info("Cleared current binary view")
 
     def load_binary(self, filepath: str) -> bn.BinaryView:
-        """Load a binary file using binaryninja.load() — the official API.
-
-        Called from the HTTP handler thread, so we dispatch to the main thread
-        via execute_on_main_thread_and_wait to avoid threading issues.
-        """
-        from binaryninja.mainthread import execute_on_main_thread_and_wait
-
-        result: list[bn.BinaryView | None] = [None]
-        error: list[Exception | None] = [None]
-
-        def _do_load():
-            try:
-                bv = bn.load(filepath, update_analysis=True)
-                if bv is None:
-                    error[0] = Exception(f"bn.load returned None for {filepath}")
-                    return
-                result[0] = bv
-            except Exception as e:
-                error[0] = e
-
-        bn.log_info(f"Loading binary via bn.load: {filepath}")
-        execute_on_main_thread_and_wait(_do_load)
-
-        if error[0] is not None:
-            bn.log_error(f"Failed to load binary: {error[0]}")
-            raise error[0]
-
-        self._current_view = result[0]
+        """Load a binary file using binaryninja.load() — the official API."""
         try:
-            if self._current_view is not None:
-                self._register_view(self._current_view)
-        except Exception:
-            pass
-        return self._current_view
+            bn.log_info(f"Loading binary via bn.load: {filepath}")
+            bv = bn.load(filepath, update_analysis=False)
+            if bv is None:
+                raise Exception(f"bn.load returned None for {filepath}")
+
+            self._current_view = bv
+            try:
+                self._register_view(bv)
+            except Exception:
+                pass
+
+            # Start analysis in the background (non-blocking)
+            bv.update_analysis()
+            bn.log_info(f"Binary loaded successfully: {filepath}")
+            return bv
+        except Exception as e:
+            bn.log_error(f"Failed to load binary: {e}")
+            raise
 
     # ---------------- Multi-binary helpers ----------------
     def _prune_views(self) -> None:
