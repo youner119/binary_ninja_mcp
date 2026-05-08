@@ -861,6 +861,94 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     bn.log_error(f"Error handling decompileToFile: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
+            elif path == "/batchDecompileToFile":
+                output_dir = params.get("outputDir") or params.get("output_dir")
+                if not output_dir:
+                    self._send_json_response(
+                        {"error": "Missing outputDir parameter"},
+                        400,
+                    )
+                    return
+
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                    bv = self.binary_ops.current_view
+                    if not bv:
+                        self._send_json_response({"error": "No binary loaded"}, 400)
+                        return
+
+                    saved = []
+                    skipped = []
+                    for func in bv.functions:
+                        # Skip external/imported functions
+                        sym = func.symbol
+                        if sym and sym.type in (
+                            bn.SymbolType.ImportedFunctionSymbol,
+                            bn.SymbolType.ImportAddressSymbol,
+                            bn.SymbolType.ExternalSymbol,
+                        ):
+                            skipped.append(func.name)
+                            continue
+                        # Skip thunks
+                        if hasattr(func, "is_thunk") and func.is_thunk:
+                            skipped.append(func.name)
+                            continue
+
+                        try:
+                            decompiled = self.binary_ops.decompile_function(func.name)
+                            if decompiled:
+                                safe_name = func.name.replace("/", "_").replace("\\", "_")
+                                fpath = os.path.join(output_dir, f"{safe_name}.txt")
+                                with open(fpath, "w", encoding="utf-8") as f:
+                                    f.write(decompiled)
+                                saved.append({"name": func.name, "address": hex(func.start), "path": fpath})
+                        except Exception as e:
+                            bn.log_warn(f"batch decompile skip {func.name}: {e}")
+                            skipped.append(func.name)
+
+                    self._send_json_response({
+                        "ok": True,
+                        "output_dir": output_dir,
+                        "saved_count": len(saved),
+                        "skipped_count": len(skipped),
+                        "saved": saved,
+                        "skipped": skipped,
+                    })
+                except Exception as e:
+                    bn.log_error(f"Error handling batchDecompileToFile: {e}")
+                    self._send_json_response({"error": str(e)}, 500)
+
+            elif path == "/saveBndb":
+                output_path = params.get("outputPath") or params.get("output_path")
+                if not output_path:
+                    self._send_json_response(
+                        {"error": "Missing outputPath parameter (e.g. /path/to/analysis.bndb)"},
+                        400,
+                    )
+                    return
+
+                try:
+                    bv = self.binary_ops.current_view
+                    if not bv:
+                        self._send_json_response({"error": "No binary loaded"}, 400)
+                        return
+
+                    # Ensure .bndb extension
+                    if not output_path.endswith(".bndb"):
+                        output_path += ".bndb"
+
+                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                    bv.create_database(output_path)
+                    bn.log_info(f"Saved BNDB to {output_path}")
+                    self._send_json_response({
+                        "ok": True,
+                        "path": output_path,
+                        "message": f"Analysis database saved to {output_path}",
+                    })
+                except Exception as e:
+                    bn.log_error(f"Error handling saveBndb: {e}")
+                    self._send_json_response({"error": str(e)}, 500)
+
             elif path == "/assembly":
                 function_name = params.get("name") or params.get("functionName")
                 if not function_name:

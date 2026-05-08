@@ -118,6 +118,53 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
   );
 
   server.tool(
+    "batch_decompile_to_file",
+    "Decompile ALL non-imported functions and save each to <outputDir>/<function_name>.txt. " +
+    "Skips external/imported functions and thunks. Returns list of saved files.",
+    {
+      output_dir: z.string().describe("Directory to write pseudocode files to"),
+    },
+    async ({ output_dir }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await client.getJson("batchDecompileToFile", { outputDir: output_dir });
+      if (!data) {
+        return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
+      }
+      if (data.error) {
+        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
+      }
+      const saved = data.saved_count ?? 0;
+      const skipped = data.skipped_count ?? 0;
+      const files = (data.saved ?? []).map((s: { name: string; path: string }) => `  ${s.name} → ${s.path}`).join("\n");
+      return {
+        content: [{ type: "text", text: `Decompiled ${saved} functions (${skipped} skipped)\nOutput: ${output_dir}\n\n${files}` }],
+      };
+    }
+  );
+
+  server.tool(
+    "save_bndb",
+    "Save the current analysis state as a .bndb database file. " +
+    "The user can open this in BN GUI later to review all renames, types, and comments.",
+    {
+      output_path: z.string().describe("Absolute path for the .bndb file (e.g. /path/to/.omp/artifacts/analysis.bndb)"),
+    },
+    async ({ output_path }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await client.getJson("saveBndb", { outputPath: output_path });
+      if (!data) {
+        return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
+      }
+      if (data.error) {
+        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
+      }
+      return {
+        content: [{ type: "text", text: `BNDB saved to ${data.path}` }],
+      };
+    }
+  );
+
+  server.tool(
     "get_il",
     "Get IL for a function in the selected view (hlil, mlil, llil).",
     {
