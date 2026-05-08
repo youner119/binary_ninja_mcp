@@ -1,4 +1,5 @@
 import json
+import os
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -817,6 +818,48 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
 
                 self._handle_decompile(function_name)
+
+            elif path == "/decompileToFile":
+                function_name = params.get("name") or params.get("functionName")
+                if not function_name:
+                    self._send_json_response(
+                        {"error": "Missing function name parameter. Use ?name=function_name"},
+                        400,
+                    )
+                    return
+                output_path = params.get("outputPath") or params.get("output_path")
+                if not output_path:
+                    self._send_json_response(
+                        {"error": "Missing outputPath parameter"},
+                        400,
+                    )
+                    return
+
+                try:
+                    decompiled = self.binary_ops.decompile_function(function_name)
+                    if decompiled is None:
+                        self._send_json_response(
+                            {"error": "Decompilation failed", "function": function_name},
+                            500,
+                        )
+                        return
+
+                    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                    with open(output_path, "w", encoding="utf-8") as f:
+                        f.write(decompiled)
+
+                    line_count = decompiled.count("\n") + 1
+                    func_info = self.binary_ops.get_function_info(function_name)
+                    self._send_json_response({
+                        "ok": True,
+                        "path": output_path,
+                        "lines": line_count,
+                        "function": func_info,
+                        "decompiled": decompiled,
+                    })
+                except Exception as e:
+                    bn.log_error(f"Error handling decompileToFile: {e}")
+                    self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/assembly":
                 function_name = params.get("name") or params.get("functionName")

@@ -91,6 +91,33 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
   );
 
   server.tool(
+    "decompile_to_file",
+    "Decompile a function and save the FULL HLIL pseudocode directly to a file on disk. " +
+    "No LLM intermediation — the complete decompiled output is written as-is. " +
+    "Also returns the pseudocode in the response for immediate analysis.",
+    {
+      name: z.string().describe("Function name or address to decompile"),
+      output_path: z.string().describe("Absolute file path to write the pseudocode (e.g. '/path/to/.omp/artifacts/pseudocode/main.txt')"),
+    },
+    async ({ name, output_path }) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await client.getJson("decompileToFile", { name, outputPath: output_path });
+      if (!data) {
+        return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
+      }
+      if (data.error) {
+        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
+      }
+      const lines = data.lines ?? 0;
+      const path = data.path ?? output_path;
+      const code = data.decompiled ?? "";
+      return {
+        content: [{ type: "text", text: `Saved ${lines} lines to ${path}\n\n${code}` }],
+      };
+    }
+  );
+
+  server.tool(
     "get_il",
     "Get IL for a function in the selected view (hlil, mlil, llil).",
     {
