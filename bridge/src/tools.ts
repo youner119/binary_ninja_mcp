@@ -738,6 +738,30 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
   // ===== Utility Tools =====
 
   server.tool(
+    "get_callers",
+    "Get functions that call the specified function(s). Returns caller names, addresses, and call sites.",
+    {
+      identifier: z.string().describe("Function name or address (or comma-separated list)"),
+    },
+    async ({ identifier }) => {
+      const lines = await client.getLines("getCallers", { identifier });
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  server.tool(
+    "get_callees",
+    "Get functions called by the specified function(s). Returns callee names, addresses, and call sites.",
+    {
+      identifier: z.string().describe("Function name or address (or comma-separated list)"),
+    },
+    async ({ identifier }) => {
+      const lines = await client.getLines("getCallees", { identifier });
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
+  );
+
+  server.tool(
     "function_at",
     "Retrieve the name of the function the address belongs to.",
     {
