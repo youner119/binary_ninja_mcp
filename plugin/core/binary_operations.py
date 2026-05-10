@@ -853,14 +853,40 @@ class BinaryOperations:
 
         return info
 
+    def _render_pseudo_c(self, func) -> str | None:
+        """Render a function using BN's Pseudo C language representation.
+
+        Returns formatted pseudocode with braces, indentation, and address prefixes,
+        identical to what BN GUI shows in the decompiler view.
+        """
+        try:
+            pseudo_c = func.pseudo_c
+            if pseudo_c is None:
+                return None
+            hlil = func.hlil
+            if hlil is None or hlil.root is None:
+                return None
+            lines = pseudo_c.get_linear_lines(hlil.root)
+            if not lines:
+                return None
+            result: list[str] = []
+            for line in lines:
+                addr = getattr(line, "address", None)
+                addr_str = f"{int(addr):08x}" if addr is not None else "        "
+                text = "".join(token.text for token in line.tokens)
+                result.append(f"{addr_str}        {text}")
+            return "\n".join(result)
+        except Exception:
+            return None
+
     def decompile_function(self, identifier: str | int) -> str | None:
-        """Decompile a function and include addresses per statement.
+        """Decompile a function using Pseudo C representation with braces and indentation.
 
         Args:
             identifier: Function name or address
 
         Returns:
-            Decompiled HLIL-like code with address prefixes per line
+            Formatted Pseudo C code with address prefixes per line
         """
         if not self._current_view:
             raise RuntimeError("No binary loaded")
@@ -873,29 +899,18 @@ class BinaryOperations:
         func.analysis_skipped = False
         self._current_view.update_analysis_and_wait()
 
+        # Primary: use Pseudo C language representation (formatted with braces/indentation)
+        result = self._render_pseudo_c(func)
+        if result:
+            return result
+
+        # Fallback: flat HLIL (if pseudo_c is unavailable)
         try:
             il = getattr(func, "hlil", None)
             if il and hasattr(il, "instructions"):
                 lines: list[str] = []
                 last_addr: int | None = None
                 for ins in il.instructions:
-                    try:
-                        addr = getattr(ins, "address", None)
-                    except Exception:
-                        addr = None
-                    if addr is None:
-                        addr = last_addr if last_addr is not None else func.start
-                    last_addr = addr
-                    addr_str = f"{int(addr):08x}"
-                    text = str(ins)
-                    lines.append(f"{addr_str}        {text}")
-                return "\n".join(lines)
-            # Fall back to MLIL with addresses
-            mil = getattr(func, "mlil", None)
-            if mil and hasattr(mil, "instructions"):
-                lines: list[str] = []
-                last_addr: int | None = None
-                for ins in mil.instructions:
                     try:
                         addr = getattr(ins, "address", None)
                     except Exception:
@@ -925,6 +940,7 @@ class BinaryOperations:
 
         Returns:
             Concatenated string with one instruction per line prefixed by address.
+            For HLIL (non-SSA): uses Pseudo C representation with braces/indentation.
         """
         if not self._current_view:
             raise RuntimeError("No binary loaded")
@@ -948,6 +964,12 @@ class BinaryOperations:
         else:
             # Default to HLIL when unknown
             prop = "hlil"
+
+        # For HLIL without SSA, use Pseudo C representation (formatted with braces)
+        if prop == "hlil" and not ssa:
+            result = self._render_pseudo_c(func)
+            if result:
+                return result
 
         try:
             il_func = getattr(func, prop, None)
