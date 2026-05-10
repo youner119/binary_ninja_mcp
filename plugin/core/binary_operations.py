@@ -489,6 +489,7 @@ class BinaryOperations:
         """Collect caller information for the given function identifiers."""
         if not self._current_view:
             raise RuntimeError("No binary loaded")
+        self._current_view.update_analysis_and_wait()
 
         items = self._normalize_identifier_list(identifiers)
         if not items:
@@ -519,6 +520,7 @@ class BinaryOperations:
         """Collect callee information for the given function identifiers."""
         if not self._current_view:
             raise RuntimeError("No binary loaded")
+        self._current_view.update_analysis_and_wait()
 
         items = self._normalize_identifier_list(identifiers)
         if not items:
@@ -858,6 +860,9 @@ class BinaryOperations:
 
         Returns formatted pseudocode with braces, indentation, and address prefixes,
         identical to what BN GUI shows in the decompiler view.
+
+        WARNING: Pseudo C may lose information — intrinsics like sbb.q(a, b, flag)
+        are simplified to C operators (a - b), dropping flag dependencies.
         """
         try:
             pseudo_c = func.pseudo_c
@@ -879,14 +884,47 @@ class BinaryOperations:
         except Exception:
             return None
 
-    def decompile_function(self, identifier: str | int) -> str | None:
-        """Decompile a function using Pseudo C representation with braces and indentation.
+    def _render_hlil(self, func) -> str | None:
+        """Render a function using HLIL with indentation and per-line addresses.
+
+        Preserves intrinsics (sbb.q, cmov, etc.) and named parameters
+        that Pseudo C rendering may lose.  Uses hlil.root.get_lines() which
+        returns DisassemblyTextLine objects with per-line addresses and
+        indentation — the same data BN GUI shows in the HLIL view.
+        """
+        try:
+            il = getattr(func, "hlil", None)
+            if il is None:
+                return None
+            root = getattr(il, "root", None)
+            if root is None:
+                return None
+            lines_iter = root.get_lines()
+            if lines_iter is None:
+                return None
+            result: list[str] = []
+            for line in lines_iter:
+                addr = getattr(line, "address", None)
+                addr_str = f"{int(addr):08x}" if addr is not None else "        "
+                text = "".join(token.text for token in line.tokens)
+                result.append(f"{addr_str}        {text}")
+            if not result:
+                return None
+            return "\n".join(result)
+        except Exception:
+            return None
+
+    def decompile_function(self, identifier: str | int, lang: str = "hlil") -> str | None:
+        """Decompile a function with selectable language representation.
 
         Args:
             identifier: Function name or address
+            lang: Language representation to use:
+                - "hlil" (default): flat HLIL with intrinsics preserved
+                - "pseudoc": C-like rendering (may lose intrinsic details)
 
         Returns:
-            Formatted Pseudo C code with address prefixes per line
+            Formatted code with address prefixes per line
         """
         if not self._current_view:
             raise RuntimeError("No binary loaded")
@@ -899,30 +937,19 @@ class BinaryOperations:
         func.analysis_skipped = False
         self._current_view.update_analysis_and_wait()
 
-        # Primary: use Pseudo C language representation (formatted with braces/indentation)
-        result = self._render_pseudo_c(func)
+        if lang == "pseudoc":
+            result = self._render_pseudo_c(func)
+            if result:
+                return result
+            # Fall through to HLIL if Pseudo C unavailable
+
+        # HLIL: flat instruction text with intrinsics preserved
+        result = self._render_hlil(func)
         if result:
             return result
 
-        # Fallback: flat HLIL (if pseudo_c is unavailable)
+        # Last resort
         try:
-            il = getattr(func, "hlil", None)
-            if il and hasattr(il, "instructions"):
-                lines: list[str] = []
-                last_addr: int | None = None
-                for ins in il.instructions:
-                    try:
-                        addr = getattr(ins, "address", None)
-                    except Exception:
-                        addr = None
-                    if addr is None:
-                        addr = last_addr if last_addr is not None else func.start
-                    last_addr = addr
-                    addr_str = f"{int(addr):08x}"
-                    text = str(ins)
-                    lines.append(f"{addr_str}        {text}")
-                return "\n".join(lines)
-            # Last resort
             return str(func)
         except Exception as e:
             bn.log_error(f"Error decompiling function: {e!s}")
@@ -940,7 +967,6 @@ class BinaryOperations:
 
         Returns:
             Concatenated string with one instruction per line prefixed by address.
-            For HLIL (non-SSA): uses Pseudo C representation with braces/indentation.
         """
         if not self._current_view:
             raise RuntimeError("No binary loaded")
@@ -964,12 +990,6 @@ class BinaryOperations:
         else:
             # Default to HLIL when unknown
             prop = "hlil"
-
-        # For HLIL without SSA, use Pseudo C representation (formatted with braces)
-        if prop == "hlil" and not ssa:
-            result = self._render_pseudo_c(func)
-            if result:
-                return result
 
         try:
             il_func = getattr(func, prop, None)

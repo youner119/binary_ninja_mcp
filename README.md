@@ -164,7 +164,7 @@ The following table lists the available MCP functions for use:
 
 | Function                                                             | Description                                                                                                  |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `decompile_function`                                                 | Decompile a specific function by name and return HLIL-like code with addresses.                              |
+| `decompile_function(name, lang)`                                     | Decompile a function. `lang="hlil"` (default) preserves intrinsics like `sbb.q`; `lang="pseudoc"` renders C-like syntax (may lose flag-dependent details). |
 | `get_il(name_or_address, view, ssa)`                                 | Get IL for a function in `hlil`, `mlil`, or `llil` (SSA supported for MLIL/LLIL).                            |
 | `define_types`                                                       | Add type definitions from a C string type definition.                                                        |
 | `delete_comment`                                                     | Delete the comment at a specific address.                                                                    |
@@ -221,6 +221,10 @@ The following table lists the available MCP functions for use:
 
 These are the list of HTTP endpoints that can be called:
 
+- `/decompile?name=<func>&lang=<hlil|pseudoc>`: Decompile a function. `lang=hlil` (default) returns HLIL with intrinsics preserved; `lang=pseudoc` returns C-like Pseudo C rendering.
+- `/decompileToFile?name=<func>&outputPath=<path>&lang=<hlil|pseudoc>`: Decompile a function and save to a file. Same `lang` options as `/decompile`.
+- `/il?name=<func>&view=<hlil|mlil|llil>&ssa=<0|1>`: Get IL for a function in the selected view.
+- `/saveBndb?outputPath=<path>`: Save the analysis database as a `.bndb` file.
 - `/allStrings`: All strings in one response.
 - `/formatValue?address=<addr>&text=<value>&size=<n>`: Convert and set a comment at an address.
 - `/getXrefsTo?address=<addr>`: Xrefs to address (code+data).

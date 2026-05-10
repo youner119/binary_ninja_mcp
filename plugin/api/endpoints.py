@@ -854,6 +854,7 @@ class BinaryNinjaEndpoints:
         """
         if not self.binary_ops.current_view:
             raise RuntimeError("No binary loaded")
+        self.binary_ops.current_view.update_analysis_and_wait()
 
         func = self.binary_ops.get_function_by_name_or_address(function_identifier)
         if not func:

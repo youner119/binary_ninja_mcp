@@ -811,13 +811,14 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 if not function_name:
                     self._send_json_response(
                         {
-                            "error": "Missing function name parameter. Use ?name=function_name or ?functionName=function_name"
+                            "error": "Missing function name parameter. Use ?name=function_name or ?functionName=function_name&lang=hlil|pseudoc"
                         },
                         400,
                     )
                     return
+                lang = (params.get("lang") or "hlil").strip().lower()
 
-                self._handle_decompile(function_name)
+                self._handle_decompile(function_name, lang=lang)
 
             elif path == "/decompileToFile":
                 function_name = params.get("name") or params.get("functionName")
@@ -834,9 +835,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         400,
                     )
                     return
+                lang = (params.get("lang") or "hlil").strip().lower()
 
                 try:
-                    decompiled = self.binary_ops.decompile_function(function_name)
+                    decompiled = self.binary_ops.decompile_function(function_name, lang=lang)
                     if decompiled is None:
                         self._send_json_response(
                             {"error": "Decompilation failed", "function": function_name},
@@ -1983,11 +1985,13 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             bn.log_error(f"Error handling GET request: {e}")
             self._send_json_response({"error": str(e)}, 500)
 
-    def _handle_decompile(self, function_name: str):
+    def _handle_decompile(self, function_name: str, lang: str = "hlil"):
         """Handle function decompilation requests.
 
         Args:
             function_name: Name or address of the function to decompile
+            lang: Language representation — "hlil" (default, intrinsics preserved)
+                  or "pseudoc" (C-like, may lose intrinsic details)
 
         Sends JSON response with either:
         - Decompiled function code and metadata
@@ -2008,7 +2012,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 return
 
             bn.log_info(f"Found function for decompilation: {func_info}")
-            decompiled = self.binary_ops.decompile_function(function_name)
+            decompiled = self.binary_ops.decompile_function(function_name, lang=lang)
 
             if decompiled is None:
                 self._send_json_response(

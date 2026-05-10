@@ -326,12 +326,18 @@ def get_data_decl(name_or_address: str, length: int = -1) -> str:
 
 
 @mcp.tool()
-def decompile_function(name: str) -> str:
+def decompile_function(name: str, lang: str = "hlil") -> str:
     """
-    Decompile a specific function by name and return the decompiled C code.
+    Decompile a specific function by name.
+
+    lang selects the output representation:
+      - "hlil" (default): flat HLIL with intrinsics preserved (sbb.q, cmov, named params).
+        Best for automated analysis — no information loss.
+      - "pseudoc": C-like rendering. More readable but may lose intrinsic details
+        (e.g. sbb flag dependencies become x - x = 0).
     """
     file_line = f"File: {_active_filename()}\n\n"
-    data = get_json("decompile", {"name": name}, timeout=None)
+    data = get_json("decompile", {"name": name, "lang": lang}, timeout=None)
     if not data:
         return file_line + "Error: no response"
     if "decompiled" in data:
