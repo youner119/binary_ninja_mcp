@@ -165,6 +165,10 @@ The following table lists the available MCP functions for use:
 | Function                                                             | Description                                                                                                  |
 | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `decompile_function(name, lang)`                                     | Decompile a function. `lang="hlil"` (default) preserves intrinsics like `sbb.q`; `lang="pseudoc"` renders C-like syntax (may lose flag-dependent details). |
+| `decompile_to_file(name, output_path, lang)`                         | Decompile a function and write the full output directly to a file on disk; also returns the pseudocode in the response. |
+| `batch_decompile_to_file(output_dir)`                                | Decompile every non-imported, non-thunk function and save each to `<output_dir>/<function_name>.txt`. Returns counts and per-function paths. |
+| `save_bndb(output_path)`                                             | Save the current analysis state to a `.bndb` database file (renames, types, comments preserved for later BN GUI review). |
+| `load_binary(filepath)`                                              | Load a binary (or `.bndb`) into Binary Ninja from an absolute path. Use when `get_binary_status` reports `loaded=false`. |
 | `get_il(name_or_address, view, ssa)`                                 | Get IL for a function in `hlil`, `mlil`, or `llil` (SSA supported for MLIL/LLIL).                            |
 | `define_types`                                                       | Add type definitions from a C string type definition.                                                        |
 | `delete_comment`                                                     | Delete the comment at a specific address.                                                                    |
@@ -203,6 +207,7 @@ The following table lists the available MCP functions for use:
 | `list_local_types(offset, count)`                                    | List local Types in the current database (name/kind/decl).                                                   |
 | `list_methods`                                                       | List all function names in the program.                                                                      |
 | `list_namespaces`                                                    | List all non-global namespaces in the program.                                                               |
+| `list_sections(offset, limit)`                                       | List sections in the program (start/end/size/name/semantics) with pagination.                                |
 | `list_segments`                                                      | List all memory segments in the program.                                                                     |
 | `list_strings(offset, count)`                                        | List all strings in the database (paginated).                                                                |
 | `list_strings_filter(offset, count, filter)`                         | List matching strings (paginated, filtered by substring).                                                    |
@@ -218,13 +223,16 @@ The following table lists the available MCP functions for use:
 | `set_function_comment`                                               | Set a comment for a function.                                                                                |
 | `set_function_prototype(name_or_address, prototype)`                 | Set a function's prototype by name or address.                                                               |
 | `patch_bytes(address, data, save_to_file)`                           | Patch raw bytes at an address (byte-level, not assembly). Can patch entire instructions by providing their bytecode. Address: hex (e.g., "0x401000") or decimal. Data: hex string (e.g., "90 90"). `save_to_file` (default True) saves to disk and re-signs on macOS. |
+| `convert_number(text, size)`                                         | Convert a number or string into multiple representations (hex/dec/bin, char, C literal). `size=0` auto-detects width. |
 
 These are the list of HTTP endpoints that can be called:
 
 - `/decompile?name=<func>&lang=<hlil|pseudoc>`: Decompile a function. `lang=hlil` (default) returns HLIL with intrinsics preserved; `lang=pseudoc` returns C-like Pseudo C rendering.
 - `/decompileToFile?name=<func>&outputPath=<path>&lang=<hlil|pseudoc>`: Decompile a function and save to a file. Same `lang` options as `/decompile`.
+- `/batchDecompileToFile?outputDir=<dir>`: Decompile every non-imported, non-thunk function and write each to `<outputDir>/<function_name>.txt`. Returns counts plus saved/skipped lists.
 - `/il?name=<func>&view=<hlil|mlil|llil>&ssa=<0|1>`: Get IL for a function in the selected view.
 - `/saveBndb?outputPath=<path>`: Save the analysis database as a `.bndb` file.
+- `/load` (POST, `filepath=<path>`): Load a binary or `.bndb` file from disk into Binary Ninja.
 - `/allStrings`: All strings in one response.
 - `/formatValue?address=<addr>&text=<value>&size=<n>`: Convert and set a comment at an address.
 - `/getXrefsTo?address=<addr>`: Xrefs to address (code+data).
@@ -235,6 +243,7 @@ These are the list of HTTP endpoints that can be called:
 - `/platforms`: List all available platform names.
 - `/binaries` or `/views`: List managed/open binaries with ids and active flag.
 - `/selectBinary?view=<id|filename>`: Select active binary for subsequent operations.
+- `/sections?offset=<n>&limit=<m>`: List sections (start/end/size/name/semantics).
 - `/data?offset=<n>&limit=<m>&length=<n>`: Defined data items with previews. `length` controls bytes read per item (capped at defined size). Default behavior reads exact defined size when available; `length=-1` forces exact-size.
 - `/getXrefsToEnum?name=<enum>`: Enum usages by matching member constants.
 - `/getXrefsToField?struct=<name>&field=<name>`: Xrefs to struct field.
@@ -248,6 +257,7 @@ These are the list of HTTP endpoints that can be called:
 - `/strings?offset=<n>&limit=<m>`: Paginated strings.
 - `/strings/filter?offset=<n>&limit=<m>&filter=<substr>`: Filtered strings.
 - `/searchTypes?query=<substr>&offset=<n>&limit=<m>`: Search local types by substring.
+- `/convertNumber?text=<value>&size=<n>`: Convert a number/string into multiple representations (hex/dec/bin, char, C literal). `size=0` auto-detects.
 - `/patch` or `/patchBytes?address=<addr>&data=<hex>&save_to_file=<bool>`: Patch raw bytes at an address (byte-level, not assembly). Can patch entire instructions by providing their bytecode. Address: hex (e.g., "0x401000") or decimal. Data: hex string (e.g., "90 90"). `save_to_file` (default True) saves to disk and re-signs on macOS.
 - `/renameVariables`: Batch rename locals in a function. Parameters:
   - Function: one of `functionAddress`, `address`, `function`, `functionName`, or `name`.
