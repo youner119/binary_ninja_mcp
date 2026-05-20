@@ -11,12 +11,20 @@ class BinaryNinjaEndpoints:
         self.binary_ops = binary_ops
 
     def get_status(self) -> dict[str, Any]:
-        """Get the current status of the binary view"""
+        """Get the current status of the binary view.
+
+        The address-translation fields (image_base, original_image_base,
+        relocatable) let downstream tooling convert BN's static VAs to
+        RVAs and runtime addresses for PIE binaries — BN's image_base is
+        an analysis anchor, not the ASLR'd runtime base.
+        """
+        bv = self.binary_ops.current_view
         return {
-            "loaded": self.binary_ops.current_view is not None,
-            "filename": self.binary_ops.current_view.file.filename
-            if self.binary_ops.current_view
-            else None,
+            "loaded": bv is not None,
+            "filename": bv.file.filename if bv else None,
+            "image_base": bv.image_base if bv else None,
+            "original_image_base": bv.original_image_base if bv else None,
+            "relocatable": bv.relocatable if bv else None,
         }
 
     def get_entry_points(self) -> list[dict[str, Any]]:

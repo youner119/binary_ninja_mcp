@@ -263,11 +263,24 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 limit = parse_int_or_default(params.get("limit"), 100)
 
             if path == "/status":
+                bv = (
+                    self.binary_ops.current_view
+                    if self.binary_ops
+                    else None
+                )
+                # Address-translation context for downstream tooling. PIE
+                # binaries make BN VAs misleading at runtime (BN's
+                # image_base is the static analysis anchor, not the
+                # ASLR'd runtime base), so callers need image_base +
+                # relocatable to convert BN_VA → RVA → runtime_addr.
                 status = {
-                    "loaded": self.binary_ops and self.binary_ops.current_view is not None,
-                    "filename": self.binary_ops.current_view.file.filename
-                    if self.binary_ops and self.binary_ops.current_view
-                    else None,
+                    "loaded": bv is not None,
+                    "filename": bv.file.filename if bv else None,
+                    "image_base": bv.image_base if bv else None,
+                    "original_image_base": (
+                        bv.original_image_base if bv else None
+                    ),
+                    "relocatable": bv.relocatable if bv else None,
                 }
                 self._send_json_response(status)
 

@@ -178,7 +178,7 @@ The following table lists the available MCP functions for use:
 | `function_at`                                                        | Retrieve the name of the function the address belongs to.                                                    |
 | `fetch_disassembly`                                              | Get the assembly representation of a function by name or address.                                            |
 | `get_entry_points()`                                                 | List entry point(s) of the loaded binary.                                                                    |
-| `get_binary_status`                                                  | Get the current status of the loaded binary.                                                                 |
+| `get_binary_status`                                                  | Get the current status of the loaded binary. Returns `loaded`, `filename`, `image_base` (analysis anchor), `original_image_base` (ELF PT_LOAD vaddr base — `0` for PIE/relocatable views), `relocatable` (PIE flag). Downstream tooling uses `image_base` + `relocatable` to convert BN VAs to runtime addresses for PIE binaries (`runtime = pie_base + (BN_VA - image_base)`). |
 | `get_comment`                                                        | Get the comment at a specific address.                                                                       |
 | `get_function_comment`                                               | Get the comment for a function.                                                                              |
 | `get_user_defined_type`                                              | Retrieve definition of a user-defined type (struct, enumeration, typedef, union).                            |
@@ -227,6 +227,7 @@ The following table lists the available MCP functions for use:
 
 These are the list of HTTP endpoints that can be called:
 
+- `/status`: Return the current BinaryView state as JSON. Keys: `loaded` (bool), `filename` (string or null), `image_base` (int — BN's analysis anchor; `0x400000` for the default x86-64 ELF reseed), `original_image_base` (int — ELF PT_LOAD vaddr base; `0` for PIE/`ET_DYN`), `relocatable` (bool — PIE flag). The address-translation fields exist so callers driving GDB / a debugger can convert BN's static VAs to runtime addresses without guessing: for PIE binaries, `RVA = BN_VA - image_base` and `runtime_addr = pie_base + RVA`. For non-PIE binaries `BN_VA == runtime_addr`.
 - `/decompile?name=<func>&lang=<hlil|pseudoc>`: Decompile a function. `lang=hlil` (default) returns HLIL with intrinsics preserved; `lang=pseudoc` returns C-like Pseudo C rendering.
 - `/decompileToFile?name=<func>&outputPath=<path>&lang=<hlil|pseudoc>`: Decompile a function and save to a file. Same `lang` options as `/decompile`.
 - `/batchDecompileToFile?outputDir=<dir>`: Decompile every non-imported, non-thunk function and write each to `<outputDir>/<function_name>.txt`. Returns counts plus saved/skipped lists.
