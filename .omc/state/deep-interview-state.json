@@ -1,0 +1,32 @@
+{
+  "active": true,
+  "current_phase": "pending-approval",
+  "state": {
+    "interview_id": "view-id-everywhere",
+    "type": "brownfield",
+    "spec_path": ".omc/specs/deep-interview-view-id-everywhere.md",
+    "final_ambiguity": 0.19,
+    "threshold": 0.2,
+    "status": "PASSED",
+    "rounds_completed": 5,
+    "topology_locked": true,
+    "micro_decisions_resolved": 10,
+    "micro_decisions_summary": {
+      "1_http_transport": "query_string_only",
+      "2_current_view": "fully_remove",
+      "3_resolve_view": "raise_ViewNotFound_Exception_top_level_catch",
+      "4_migration": "3_phase",
+      "5_response_schema": "create_full_list_concise_delete_explicit",
+      "6_error_codes": "RESTful_400_404_409_422",
+      "7_concurrency": "none_last_wins_BN_internal_lock",
+      "8_bridge_zod": "baseSchema_spread_explicit_handler",
+      "9_ui_sync": "fully_remove_GUI_not_used",
+      "10_tests": "pytest_fixture_phase_gates"
+    },
+    "phase_gate_mapping": {
+      "phase_1": ["AC-1", "AC-2", "AC-3", "AC-4", "AC-5"],
+      "phase_2": ["AC-6", "AC-7", "AC-8", "AC-9"],
+      "phase_3": ["AC-10", "AC-11", "AC-12"]
+    }
+  }
+}
