@@ -1,14 +1,31 @@
 import platform
 import re
 import subprocess
+import time
 import weakref
 from typing import Any
 
 import binaryninja as bn
-from binaryninja.enums import StructureVariant, TypeClass
+from binaryninja.enums import AnalysisState, StructureVariant, TypeClass
 
 from ..utils.string_utils import escape_non_ascii
 from .config import BinaryNinjaConfig
+
+
+class AnalysisNotReady(BaseException):
+    """Signaled when Binary Ninja analysis is still running after a bounded wait.
+
+    Inherits from BaseException (not Exception) so it propagates past routine
+    ``except Exception`` blocks and is only caught by handlers that explicitly
+    want to surface "analysis in progress" responses to the client.
+
+    The ``progress`` dict is the response body that the HTTP layer should send
+    back with a 202 status.
+    """
+
+    def __init__(self, progress: dict):
+        self.progress = progress
+        super().__init__(progress.get("hint", "Analysis still running"))
 
 
 class BinaryOperations:
@@ -143,6 +160,63 @@ class BinaryOperations:
     def register_view(self, bv: bn.BinaryView) -> str:
         """Public wrapper to register a BinaryView and return its id."""
         return self._register_view(bv)
+
+    def ensure_analysis_ready(self, bv: bn.BinaryView | None = None, timeout_s: float = 5.0) -> None:
+        """Block up to ``timeout_s`` waiting for BN analysis to reach Idle.
+
+        Replacement for ``bv.update_analysis_and_wait()`` inside HTTP handlers.
+        Unlike the BN call, this never blocks indefinitely: if analysis is still
+        running after the deadline, it raises ``AnalysisNotReady`` carrying a
+        progress dict, which the HTTP layer translates into a 202 response so
+        the client can retry instead of timing out at the bridge layer.
+
+        Args:
+            bv: BinaryView to wait on; defaults to ``self._current_view``.
+            timeout_s: Maximum seconds to poll for ``AnalysisState.IdleState``.
+
+        Raises:
+            RuntimeError: if no view is available.
+            AnalysisNotReady: if analysis is still running after ``timeout_s``.
+        """
+        target = bv if bv is not None else self._current_view
+        if target is None:
+            raise RuntimeError("No binary loaded")
+
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            try:
+                state = target.analysis_info.state
+            except Exception:
+                # If state is unreadable, fail open — preserve old behavior.
+                return
+            if state == AnalysisState.IdleState:
+                return
+            if time.monotonic() >= deadline:
+                count = total = None
+                try:
+                    prog = target.analysis_progress
+                    count = int(prog.count)
+                    total = int(prog.total)
+                except Exception:
+                    pass
+                pct: int | None = None
+                if count is not None and total:
+                    pct = count * 100 // total
+                state_name = getattr(state, "name", None) or str(state).rsplit(".", 1)[-1]
+                hint = f"Binary Ninja analysis still running (state={state_name}"
+                if pct is not None:
+                    hint += f", {pct}%"
+                hint += "). Wait a few seconds and retry the same call."
+                raise AnalysisNotReady({
+                    "analysis_in_progress": True,
+                    "state": state_name,
+                    "progress_count": count,
+                    "progress_total": total,
+                    "progress_pct": pct,
+                    "elapsed_s": round(timeout_s, 1),
+                    "hint": hint,
+                })
+            time.sleep(0.2)
 
     def unregister_by_filename(self, filename: str) -> int:
         """Remove all tracked views that match the given absolute filename.
@@ -489,7 +563,7 @@ class BinaryOperations:
         """Collect caller information for the given function identifiers."""
         if not self._current_view:
             raise RuntimeError("No binary loaded")
-        self._current_view.update_analysis_and_wait()
+        self.ensure_analysis_ready()
 
         items = self._normalize_identifier_list(identifiers)
         if not items:
@@ -520,7 +594,7 @@ class BinaryOperations:
         """Collect callee information for the given function identifiers."""
         if not self._current_view:
             raise RuntimeError("No binary loaded")
-        self._current_view.update_analysis_and_wait()
+        self.ensure_analysis_ready()
 
         items = self._normalize_identifier_list(identifiers)
         if not items:
@@ -935,7 +1009,7 @@ class BinaryOperations:
 
         # analyze func in case it was skipped
         func.analysis_skipped = False
-        self._current_view.update_analysis_and_wait()
+        self.ensure_analysis_ready()
 
         if lang == "pseudoc":
             result = self._render_pseudo_c(func)
@@ -978,7 +1052,7 @@ class BinaryOperations:
         # Ensure analysis has run for this function
         try:
             func.analysis_skipped = False
-            self._current_view.update_analysis_and_wait()
+            self.ensure_analysis_ready()
         except Exception:
             pass
 

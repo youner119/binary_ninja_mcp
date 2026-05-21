@@ -2,14 +2,14 @@ import json
 import os
 import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import binaryninja as bn
 from binaryninja.settings import Settings
 
 from ..api.endpoints import BinaryNinjaEndpoints
-from ..core.binary_operations import BinaryOperations
+from ..core.binary_operations import AnalysisNotReady, BinaryOperations
 from ..core.config import Config
 from ..utils.number_utils import convert_number as util_convert_number
 from ..utils.string_utils import parse_int_or_default
@@ -1994,6 +1994,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             else:
                 self._send_json_response({"error": "Not found"}, 404)
 
+        except AnalysisNotReady as nr:
+            self._send_json_response(nr.progress, 202)
         except Exception as e:
             bn.log_error(f"Error handling GET request: {e}")
             self._send_json_response({"error": str(e)}, 500)
@@ -2485,6 +2487,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
             else:
                 self._send_json_response({"error": "Not found"}, 404)
+        except AnalysisNotReady as nr:
+            self._send_json_response(nr.progress, 202)
         except Exception as e:
             bn.log_error(f"Error handling POST request: {e}")
             self._send_json_response({"error": str(e)}, 500)
@@ -2517,7 +2521,7 @@ class MCPServer:
             {"binary_ops": self.binary_ops},
         )
 
-        self.server = HTTPServer(server_address, handler_class)
+        self.server = ThreadingHTTPServer(server_address, handler_class)
         self.thread = threading.Thread(target=self.server.serve_forever)
         self.thread.daemon = True
         self.thread.start()
