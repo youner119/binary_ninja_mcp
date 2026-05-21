@@ -150,7 +150,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             return {"name": post_data.strip()}
 
     # ---------- Helpers ----------
-    def _resolve_name_to_address(self, ident: str):
+    def _resolve_name_to_address(self, ident: str, view_id: str | None = None):
         """Resolve a symbol name or hex address string to (address:int, label:str).
 
         Tries, in order:
@@ -159,7 +159,12 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
         - get_symbol_by_name
         - scan data_vars for matching symbol name/raw_name
         """
-        bv = getattr(self.binary_ops, "current_view", None)
+        if not view_id:
+            return None, None
+        try:
+            bv = self.binary_ops.resolve_view(view_id)
+        except Exception:
+            return None, None
         if not bv:
             return None, None
         s = (ident or "").strip()
@@ -237,54 +242,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
         except Exception:
             return '""'
 
-    def _check_binary_loaded(self):
-        """Check if a binary is loaded and return appropriate error response if not.
-
-        Phase 2: if the request supplies view_id, defer the existence check to
-        the route handler (which calls resolve_view → 404 on missing). Only fall
-        back to the legacy _current_view check when no view_id is provided.
-        """
-        try:
-            params = self._parse_query_params()
-            if params.get("view_id"):
-                return True
-        except Exception:
-            pass
-        # POST bodies (axios from the bridge sends application/json) carry
-        # view_id in the body, not the query string. Peek the body once and
-        # cache it so _parse_post_params can reuse it without re-reading.
-        if getattr(self, "command", None) == "POST":
-            try:
-                content_type = self.headers.get("Content-Type", "")
-                content_length = int(self.headers.get("Content-Length", 0) or 0)
-                if content_length > 0 and "application/json" in content_type.lower():
-                    if not hasattr(self, "_cached_post_body"):
-                        self._cached_post_body = self.rfile.read(content_length).decode("utf-8")
-                    if '"view_id"' in self._cached_post_body:
-                        return True
-            except Exception:
-                pass
-        if not self.binary_ops or not self.binary_ops.current_view:
-            self._send_json_response({"error": "No binary loaded"}, 400)
-            return False
-        return True
-
     def do_GET(self):
         try:
-            # For all endpoints except /status, /convertNumber, /platforms, /binaries, /views, /selectBinary, /listView, check loaded
-            if (
-                not (
-                    self.path.startswith("/status")
-                    or self.path.startswith("/convertNumber")
-                    or self.path.startswith("/platforms")
-                    or self.path.startswith("/binaries")
-                    or self.path.startswith("/views")
-                    or self.path.startswith("/selectBinary")
-                    or self.path.startswith("/listView")
-                )
-                and not self._check_binary_loaded()
-            ):
-                return
 
             params = self._parse_query_params()
             path = urllib.parse.urlparse(self.path).path
@@ -295,29 +254,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             else:
                 limit = parse_int_or_default(params.get("limit"), 100)
 
-            if path == "/status":
-                bv = (
-                    self.binary_ops.current_view
-                    if self.binary_ops
-                    else None
-                )
-                # Address-translation context for downstream tooling. PIE
-                # binaries make BN VAs misleading at runtime (BN's
-                # image_base is the static analysis anchor, not the
-                # ASLR'd runtime base), so callers need image_base +
-                # relocatable to convert BN_VA → RVA → runtime_addr.
-                status = {
-                    "loaded": bv is not None,
-                    "filename": bv.file.filename if bv else None,
-                    "image_base": bv.image_base if bv else None,
-                    "original_image_base": (
-                        bv.original_image_base if bv else None
-                    ),
-                    "relocatable": bv.relocatable if bv else None,
-                }
-                self._send_json_response(status)
-
-            elif path == "/functions" or path == "/methods":
+            if path == "/functions" or path == "/methods":
                 view_id = params.get("view_id")
                 if not view_id:
                     self._send_json_response({"error": "view_id required"}, 400)
@@ -349,28 +286,6 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
                 imports = self.endpoints.get_imports(offset, limit, view_id=view_id)
                 self._send_json_response({"imports": imports})
-
-            elif path == "/binaries" or path == "/views":
-                # List managed/open binaries
-                self._send_json_response(self.endpoints.list_binaries())
-
-            elif path == "/selectBinary":
-                ident = (
-                    params.get("view")
-                    or params.get("binary")
-                    or params.get("id")
-                    or params.get("file")
-                )
-                if not ident:
-                    self._send_json_response(
-                        {
-                            "error": "Missing parameter",
-                            "help": "Use ?view=<id|filename>",
-                        },
-                        400,
-                    )
-                else:
-                    self._send_json_response(self.endpoints.select_binary(ident))
 
             elif path == "/exports":
                 view_id = params.get("view_id")
@@ -661,7 +576,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         self.wfile.write(b"Missing name parameter\n")
                         return
 
-                    addr, label = self._resolve_name_to_address(name)
+                    addr, label = self._resolve_name_to_address(name, view_id)
                     if addr is None:
                         self._set_headers(content_type="text/plain", status_code=404)
                         self.wfile.write(b"Symbol not found\n")
@@ -750,7 +665,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                             400,
                         )
                         return
-                    addr, label = self._resolve_name_to_address(ident)
+                    addr, label = self._resolve_name_to_address(ident, view_id)
                     if addr is None:
                         self._send_json_response({"error": "Symbol not found", "ident": ident}, 404)
                         return
@@ -2301,29 +2216,11 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
         try:
             path = urllib.parse.urlparse(self.path).path
 
-            # /load, /createView, /deleteView must work without a binary already open
-            if path not in ("/load", "/createView", "/deleteView") and not self._check_binary_loaded():
-                return
-
             params = self._parse_post_params()
 
             bn.log_info(f"POST {path} with params: {params}")
 
-            if path == "/load":
-                filepath = params.get("filepath")
-                if not filepath:
-                    self._send_json_response({"error": "Missing filepath parameter"}, 400)
-                    return
-
-                try:
-                    self.binary_ops.load_binary(filepath)
-                    self._send_json_response(
-                        {"success": True, "message": f"Binary loaded: {filepath}"}
-                    )
-                except Exception as e:
-                    self._send_json_response({"error": str(e)}, 500)
-
-            elif path == "/rename/function" or path == "/renameFunction":
+            if path == "/rename/function" or path == "/renameFunction":
                 view_id = params.get("view_id")
                 if not view_id:
                     self._send_json_response({"error": "view_id required"}, 400)

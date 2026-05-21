@@ -47,7 +47,6 @@ class ViewNotFound(BaseException):
 class BinaryOperations:
     def __init__(self, config: BinaryNinjaConfig):
         self.config = config
-        self._current_view: bn.BinaryView | None = None
         # Multi-binary support
         # Store weak references so closed views are auto-pruned
         self._views_by_id: dict[str, weakref.ReferenceType] = {}
@@ -60,51 +59,11 @@ class BinaryOperations:
         self._next_view_id: int = 1
         self._id_by_filename: dict[str, str] = {}
 
-    @property
-    def current_view(self) -> bn.BinaryView | None:
-        return self._current_view
-
-    @current_view.setter
-    def current_view(self, bv: bn.BinaryView | None):
-        self._current_view = bv
-        if bv:
-            bn.log_info(f"Set current binary view: {bv.file.filename}")
-            try:
-                self._register_view(bv)
-            except Exception:
-                pass
-        else:
-            bn.log_info("Cleared current binary view")
-
-    def load_binary(self, filepath: str) -> bn.BinaryView:
-        """Load a binary file using binaryninja.load() — the official API."""
-        try:
-            bn.log_info(f"Loading binary via bn.load: {filepath}")
-            bv = bn.load(filepath, update_analysis=False)
-            if bv is None:
-                raise Exception(f"bn.load returned None for {filepath}")
-
-            # Register FIRST so _prune_views won't clear current_view
-            try:
-                self._register_view(bv)
-            except Exception:
-                pass
-            self._current_view = bv
-
-            # Start analysis in the background (non-blocking)
-            bv.update_analysis()
-            bn.log_info(f"Binary loaded successfully: {filepath}")
-            return bv
-        except Exception as e:
-            bn.log_error(f"Failed to load binary: {e}")
-            raise
-
     # ---------------- Multi-binary helpers ----------------
     def _prune_views(self) -> None:
         """Remove entries for BinaryViews that no longer exist and rebuild filename map."""
         alive: dict[str, weakref.ReferenceType] = {}
         new_fn_map: dict[str, str] = {}
-        alive_objs: list[object] = []
         for vid, w in list(self._views_by_id.items()):
             try:
                 vb = w()
@@ -113,39 +72,15 @@ class BinaryOperations:
             if vb is None:
                 continue
             alive[vid] = w
-            alive_objs.append(vb)
             try:
                 fn = str(getattr(vb.file, "filename", None)) if getattr(vb, "file", None) else None
             except Exception:
                 fn = None
             if fn and fn not in new_fn_map:
                 new_fn_map[fn] = vid
-        # If current_view is alive but not yet tracked (e.g. loaded via API),
-        # re-register it so it survives pruning.
-        if self._current_view is not None:
-            cv_tracked = any(obj is self._current_view for obj in alive_objs)
-            if not cv_tracked:
-                cv_id = f"v{self._next_view_id}"
-                self._next_view_id += 1
-                alive[cv_id] = weakref.ref(self._current_view)
-                alive_objs.append(self._current_view)
-                try:
-                    fn = str(getattr(self._current_view.file, "filename", None)) if getattr(self._current_view, "file", None) else None
-                except Exception:
-                    fn = None
-                if fn and fn not in new_fn_map:
-                    new_fn_map[fn] = cv_id
 
         self._views_by_id = alive
         self._id_by_filename = new_fn_map
-        # If current_view no longer exists among alive views, clear it
-        try:
-            if self._current_view is not None and all(
-                obj is not self._current_view for obj in alive_objs
-            ):
-                self._current_view = None
-        except Exception:
-            self._current_view = None
 
     def _register_view(self, bv: bn.BinaryView) -> str:
         """Add a view to the managed list if not present, return its id."""
@@ -183,7 +118,7 @@ class BinaryOperations:
         """Public wrapper to register a BinaryView and return its id."""
         return self._register_view(bv)
 
-    def ensure_analysis_ready(self, bv: bn.BinaryView | None = None, timeout_s: float = 5.0) -> None:
+    def ensure_analysis_ready(self, bv: bn.BinaryView, timeout_s: float = 5.0) -> None:
         """Block up to ``timeout_s`` waiting for BN analysis to reach Idle.
 
         Replacement for ``bv.update_analysis_and_wait()`` inside HTTP handlers.
@@ -193,16 +128,16 @@ class BinaryOperations:
         the client can retry instead of timing out at the bridge layer.
 
         Args:
-            bv: BinaryView to wait on; defaults to ``self._current_view``.
+            bv: BinaryView to wait on (required — must be explicit).
             timeout_s: Maximum seconds to poll for ``AnalysisState.IdleState``.
 
         Raises:
-            RuntimeError: if no view is available.
+            ValueError: bv is None (callers must pass an explicit view).
             AnalysisNotReady: if analysis is still running after ``timeout_s``.
         """
-        target = bv if bv is not None else self._current_view
-        if target is None:
-            raise RuntimeError("No binary loaded")
+        if bv is None:
+            raise ValueError("ensure_analysis_ready requires explicit bv")
+        target = bv
 
         deadline = time.monotonic() + max(0.0, float(timeout_s))
         while True:
@@ -264,15 +199,6 @@ class BinaryOperations:
                 to_delete.append(vid)
         for vid in to_delete:
             self._views_by_id.pop(vid, None)
-        # Rebuild filename map and clear current_view if it matched
-        try:
-            cur_fn = None
-            if self._current_view and getattr(self._current_view, "file", None):
-                cur_fn = getattr(self._current_view.file, "filename", None)
-            if cur_fn == filename:
-                self._current_view = None
-        except Exception:
-            self._current_view = None
         self._prune_views()
         return len(to_delete)
 
@@ -303,23 +229,17 @@ class BinaryOperations:
         return bv
 
     def _resolve_or_current(self, view_id: str | None) -> bn.BinaryView:
-        """Pick the BinaryView a method should operate on.
-
-        Phase 2 transitional helper:
-            - view_id explicit → resolve_view (multi-session path).
-            - view_id None     → fall back to _current_view (legacy single-view
-              path). Phase 3 removes the fallback and makes view_id mandatory.
+        """Resolve view_id → BinaryView. Wrapper around resolve_view kept for
+        historical naming; Phase 2 used this name to indicate the legacy
+        _current_view fallback path, which is now gone.
 
         Raises:
-            ValueError: view_id is an empty string.
-            ViewNotFound: view_id is non-empty but not registered.
-            RuntimeError: view_id is None and no _current_view either.
+            ValueError: view_id is None or empty — mapped to HTTP 400.
+            ViewNotFound: view_id is non-empty but not registered — mapped to HTTP 404.
         """
-        if view_id is not None:
-            return self.resolve_view(view_id)
-        if self._current_view is None:
-            raise RuntimeError("No binary loaded")
-        return self._current_view
+        if view_id is None:
+            raise ValueError("view_id required (non-empty string)")
+        return self.resolve_view(view_id)
 
     def _view_info(self, bv: bn.BinaryView, view_id: str, *, summary: bool = False) -> dict:
         """Build the response schema for create_view / list_view.
@@ -489,130 +409,9 @@ class BinaryOperations:
         # Clean filename map if this view_id was the latest for that filename
         if fn and self._id_by_filename.get(str(fn)) == view_id:
             self._id_by_filename.pop(str(fn), None)
-        # Clear current_view if it matched (transient — Phase 3 removes _current_view).
-        if self._current_view is not None and self._current_view is bv:
-            self._current_view = None
         return {"view_id": view_id, "deleted": True}
 
-    def list_open_binaries(self) -> list[dict[str, str]]:
-        """Return a list of managed/open binaries with ids.
-
-        Note: Tracks binaries opened via this plugin or explicitly registered as current_view.
-        """
-        items: list[dict[str, str]] = []
-        # Cleanup first
-        self._prune_views()
-        # Do NOT auto-register current_view here; UI monitor handles discovery.
-        # This avoids re-introducing closed views via a stale strong reference.
-        # Deduplicate by canonical filename; prefer the id mapped in _id_by_filename
-        entries: list[tuple[str, str, bool]] = []  # (id, filename, active)
-        seen: set[str] = set()
-        for vid, w in self._views_by_id.items():
-            try:
-                vb = w()
-            except Exception:
-                vb = None
-            if vb is None:
-                continue
-            try:
-                fn = vb.file.filename
-            except Exception:
-                fn = "(unknown)"
-            key = fn
-            if key in seen:
-                continue
-            seen.add(key)
-            # Resolve canonical id for this filename when available
-            canonical_id = self._id_by_filename.get(fn, vid)
-            try:
-                vb_canon_ref = self._views_by_id.get(canonical_id)
-                vb_canon = vb_canon_ref() if vb_canon_ref else vb
-            except Exception:
-                vb_canon = vb
-            entries.append((canonical_id, fn, bool(vb_canon is self._current_view)))
-        # Sort by filename for stable ordering
-        entries.sort(key=lambda t: (t[1] or ""))
-        for cid, fn, active in entries:
-            items.append({"id": cid, "filename": fn, "active": active})
-        return items
-
-    def select_view(self, ident: str) -> dict[str, str] | None:
-        """Select active BinaryView by id or filename/basename.
-
-        Returns selection info on success, None on failure.
-        """
-        s = (ident or "").strip()
-        if not s:
-            return None
-        self._prune_views()
-        # Try id
-        w = self._views_by_id.get(s)
-        vb = None
-        if w is not None:
-            try:
-                vb = w()
-            except Exception:
-                vb = None
-        # If user passed a 1-based ordinal (from /binaries), map it to filename
-        if vb is None and s.isdigit():
-            try:
-                idx = int(s)
-                if idx >= 1:
-                    lst = self.list_open_binaries()  # sorted order
-                    if 1 <= idx <= len(lst):
-                        fname = lst[idx - 1].get("filename")
-                        if fname:
-                            map_id = self._id_by_filename.get(fname)
-                            if map_id:
-                                wmap = self._views_by_id.get(map_id)
-                                vb = wmap() if wmap else None
-            except Exception:
-                vb = None
-        # Try direct filename mapping
-        if vb is None:
-            try:
-                # Exact filename
-                map_id = self._id_by_filename.get(s)
-                if map_id:
-                    wmap = self._views_by_id.get(map_id)
-                    vb = wmap() if wmap else None
-            except Exception:
-                vb = None
-        if vb is None:
-            # Try match by full filename or basename
-            for vid, w2 in self._views_by_id.items():
-                try:
-                    v = w2()
-                except Exception:
-                    v = None
-                if v is None:
-                    continue
-                try:
-                    fn = v.file.filename
-                except Exception:
-                    fn = None
-                if not fn:
-                    continue
-                import os as _os
-
-                if s == fn or s == _os.path.basename(fn):
-                    vb = v
-                    break
-        if vb is None:
-            return None
-        self.current_view = vb
-        vid = None
-        for k, wv in self._views_by_id.items():
-            try:
-                vv = wv()
-            except Exception:
-                vv = None
-            if vv is vb:
-                vid = k
-                break
-        return {"id": vid or "", "filename": getattr(vb.file, "filename", "(unknown)")}
-
-    def get_function_by_name_or_address(self, identifier: str | int, *, view_id: str | None = None) -> bn.Function | None:
+    def get_function_by_name_or_address(self, identifier: str | int, *, view_id: str) -> bn.Function | None:
         """Get a function by either its name or address.
 
         Args:
@@ -799,7 +598,7 @@ class BinaryOperations:
                 continue
         return entries
 
-    def get_callers(self, identifiers: Any, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_callers(self, identifiers: Any, *, view_id: str) -> dict[str, Any]:
         """Collect caller information for the given function identifiers."""
         bv = self._resolve_or_current(view_id)
         self.ensure_analysis_ready(bv)
@@ -829,7 +628,7 @@ class BinaryOperations:
 
         return {"results": results, "errors": errors}
 
-    def get_callees(self, identifiers: Any, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_callees(self, identifiers: Any, *, view_id: str) -> dict[str, Any]:
         """Collect callee information for the given function identifiers."""
         bv = self._resolve_or_current(view_id)
         self.ensure_analysis_ready(bv)
@@ -859,7 +658,7 @@ class BinaryOperations:
 
         return {"results": results, "errors": errors}
 
-    def get_function_names(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, str]]:
+    def get_function_names(self, offset: int = 0, limit: int = 100, *, view_id: str) -> list[dict[str, str]]:
         """Get list of function names with addresses"""
         bv = self._resolve_or_current(view_id)
 
@@ -875,7 +674,7 @@ class BinaryOperations:
 
         return functions[offset : offset + limit]
 
-    def get_class_names(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[str]:
+    def get_class_names(self, offset: int = 0, limit: int = 100, *, view_id: str) -> list[str]:
         """Get list of class names with pagination"""
         bv = self._resolve_or_current(view_id)
 
@@ -932,7 +731,7 @@ class BinaryOperations:
             bn.log_error(f"Error getting class names: {e}")
             return []
 
-    def get_segments(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, Any]]:
+    def get_segments(self, offset: int = 0, limit: int = 100, *, view_id: str) -> list[dict[str, Any]]:
         """Get list of segments with pagination"""
         bv = self._resolve_or_current(view_id)
 
@@ -973,7 +772,7 @@ class BinaryOperations:
 
         return segments[offset : offset + limit]
 
-    def get_sections(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, Any]]:
+    def get_sections(self, offset: int = 0, limit: int = 100, *, view_id: str) -> list[dict[str, Any]]:
         """Get list of sections with pagination.
 
         Returns per-section fields when available:
@@ -1058,7 +857,7 @@ class BinaryOperations:
 
         return results[offset : offset + limit]
 
-    def rename_function(self, old_name: str, new_name: str, *, view_id: str | None = None) -> bool:
+    def rename_function(self, old_name: str, new_name: str, *, view_id: str) -> bool:
         """Rename a function using multiple fallback methods.
 
         Args:
@@ -1134,7 +933,7 @@ class BinaryOperations:
             bn.log_error(f"Error in rename_function: {e}")
             return False
 
-    def get_function_info(self, identifier: str | int, *, view_id: str | None = None) -> dict[str, Any] | None:
+    def get_function_info(self, identifier: str | int, *, view_id: str) -> dict[str, Any] | None:
         """Get detailed information about a function"""
         bv = self._resolve_or_current(view_id)  # noqa: F841 — validates view exists
 
@@ -1220,7 +1019,7 @@ class BinaryOperations:
         except Exception:
             return None
 
-    def decompile_function(self, identifier: str | int, lang: str = "hlil", *, view_id: str | None = None) -> str | None:
+    def decompile_function(self, identifier: str | int, lang: str = "hlil", *, view_id: str) -> str | None:
         """Decompile a function with selectable language representation.
 
         Args:
@@ -1261,7 +1060,7 @@ class BinaryOperations:
             return None
 
     def get_function_il(
-        self, identifier: str | int, view: str = "hlil", ssa: bool = False, *, view_id: str | None = None
+        self, identifier: str | int, view: str = "hlil", ssa: bool = False, *, view_id: str
     ) -> str | None:
         """Return IL for a function with selectable view and optional SSA form.
 
@@ -1328,7 +1127,7 @@ class BinaryOperations:
             )
             return None
 
-    def rename_data(self, address: int, new_name: str, *, view_id: str | None = None) -> bool:
+    def rename_data(self, address: int, new_name: str, *, view_id: str) -> bool:
         """Rename data at a specific address"""
         bv = self._resolve_or_current(view_id)
 
@@ -1343,7 +1142,7 @@ class BinaryOperations:
         return False
 
     def make_function_at(
-        self, address: str | int, architecture: str | None = None, *, view_id: str | None = None
+        self, address: str | int, architecture: str | None = None, *, view_id: str
     ) -> dict[str, Any]:
         """Create a function at the given address (no-op if it already exists).
 
@@ -1563,7 +1362,7 @@ class BinaryOperations:
         }
 
     def get_defined_data(
-        self, offset: int = 0, limit: int = 100, read_len: int = 32, *, view_id: str | None = None
+        self, offset: int = 0, limit: int = 100, read_len: int = 32, *, view_id: str
     ) -> list[dict[str, Any]]:
         """Get list of defined data variables with lightweight previews and sizes.
 
@@ -1699,7 +1498,7 @@ class BinaryOperations:
 
         return data_items[offset : offset + limit]
 
-    def infer_data_size(self, address: int, *, view_id: str | None = None) -> int | None:
+    def infer_data_size(self, address: int, *, view_id: str) -> int | None:
         """Infer size for data at address when BN hasn't defined a type width.
 
         Strategy:
@@ -1771,7 +1570,7 @@ class BinaryOperations:
         return None
 
     def list_local_types(
-        self, offset: int = 0, limit: int = 100, include_libraries: bool = False, *, view_id: str | None = None
+        self, offset: int = 0, limit: int = 100, include_libraries: bool = False, *, view_id: str
     ) -> list[dict[str, Any]]:
         """List local types (Types view) in the current database.
 
@@ -1986,7 +1785,7 @@ class BinaryOperations:
         return results[offset : offset + limit]
 
     def search_local_types(
-        self, query: str, offset: int = 0, limit: int = 100, include_libraries: bool = False, *, view_id: str | None = None
+        self, query: str, offset: int = 0, limit: int = 100, include_libraries: bool = False, *, view_id: str
     ) -> list[dict[str, Any]]:
         """Search local/view types whose name or declaration contains the substring.
 
@@ -2011,7 +1810,7 @@ class BinaryOperations:
             return matches[offset:]
         return matches[offset : offset + limit]
 
-    def get_type_info(self, name: str, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_type_info(self, name: str, *, view_id: str) -> dict[str, Any]:
         """Resolve a type by name and return detailed information.
 
         Returns a dictionary with:
@@ -2185,7 +1984,7 @@ class BinaryOperations:
             "source": source,
         }
 
-    def get_strings(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, Any]]:
+    def get_strings(self, offset: int = 0, limit: int = 100, *, view_id: str) -> list[dict[str, Any]]:
         """Get list of strings in the current binary view with pagination.
 
         Returns a list of dictionaries containing:
@@ -2277,7 +2076,7 @@ class BinaryOperations:
             bn.log_error(f"Error getting strings: {e}")
             return []
 
-    def set_comment(self, address: int, comment: str, *, view_id: str | None = None) -> bool:
+    def set_comment(self, address: int, comment: str, *, view_id: str) -> bool:
         """Set a comment at a specific address.
 
         Args:
@@ -2301,7 +2100,7 @@ class BinaryOperations:
             bn.log_error(f"Failed to set comment: {e}")
             return False
 
-    def set_function_comment(self, identifier: str | int, comment: str, *, view_id: str | None = None) -> bool:
+    def set_function_comment(self, identifier: str | int, comment: str, *, view_id: str) -> bool:
         """Set a comment for a function.
 
         Args:
@@ -2326,7 +2125,7 @@ class BinaryOperations:
             bn.log_error(f"Failed to set function comment: {e}")
             return False
 
-    def get_comment(self, address: int, *, view_id: str | None = None) -> str | None:
+    def get_comment(self, address: int, *, view_id: str) -> str | None:
         """Get the comment at a specific address.
 
         Args:
@@ -2348,7 +2147,7 @@ class BinaryOperations:
             bn.log_error(f"Failed to get comment: {e}")
             return None
 
-    def get_function_comment(self, identifier: str | int, *, view_id: str | None = None) -> str | None:
+    def get_function_comment(self, identifier: str | int, *, view_id: str) -> str | None:
         """Get the comment for a function.
 
         Args:
@@ -2371,7 +2170,7 @@ class BinaryOperations:
             bn.log_error(f"Failed to get function comment: {e}")
             return None
 
-    def delete_comment(self, address: int, *, view_id: str | None = None) -> bool:
+    def delete_comment(self, address: int, *, view_id: str) -> bool:
         """Delete a comment at a specific address"""
         bv = self._resolve_or_current(view_id)
 
@@ -2383,7 +2182,7 @@ class BinaryOperations:
             bn.log_error(f"Failed to delete comment: {e}")
         return False
 
-    def delete_function_comment(self, identifier: str | int, *, view_id: str | None = None) -> bool:
+    def delete_function_comment(self, identifier: str | int, *, view_id: str) -> bool:
         """Delete a comment for a function"""
         self._resolve_or_current(view_id)  # validates view exists
 
@@ -2400,7 +2199,7 @@ class BinaryOperations:
 
     # set_integer_display removed per request
 
-    def get_assembly_function(self, identifier: str | int, *, view_id: str | None = None) -> str | None:
+    def get_assembly_function(self, identifier: str | int, *, view_id: str) -> str | None:
         """Get the assembly representation of a function with practical annotations.
 
         Args:
@@ -2640,7 +2439,7 @@ class BinaryOperations:
             bn.log_error(f"Error annotating instruction at {hex(addr)}: {e!s}")
             return f"{addr:08x}  {hex_bytes} ; [Error: {e!s}]"
 
-    def get_functions_containing_address(self, address: int, *, view_id: str | None = None) -> list:
+    def get_functions_containing_address(self, address: int, *, view_id: str) -> list:
         """Get functions containing a specific address.
 
         Args:
@@ -2658,7 +2457,7 @@ class BinaryOperations:
             bn.log_error(f"Error getting functions containing address {hex(address)}: {e}")
             return []
 
-    def get_entry_points(self, *, view_id: str | None = None) -> list[dict[str, Any]]:
+    def get_entry_points(self, *, view_id: str) -> list[dict[str, Any]]:
         """Return entry point(s) for the current binary view.
 
         Primarily uses `bv.entry_point`. Also includes common startup symbols like
@@ -2717,7 +2516,7 @@ class BinaryOperations:
 
     # Removed: get_function_code_references() in favor of address-based get_xrefs_to_* helpers
 
-    def get_user_defined_type(self, type_name: str, *, view_id: str | None = None) -> dict[str, Any] | None:
+    def get_user_defined_type(self, type_name: str, *, view_id: str) -> dict[str, Any] | None:
         """Get the definition of a user-defined type (struct, enum, etc.)
 
         Args:
@@ -2805,7 +2604,7 @@ class BinaryOperations:
             bn.log_error(f"Error getting user-defined type {type_name}: {e}")
             return None
 
-    def get_xrefs_to_address(self, address: int | str, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_xrefs_to_address(self, address: int | str, *, view_id: str) -> dict[str, Any]:
         """Get all cross references (code and data) to a given address.
 
         Args:
@@ -2972,7 +2771,7 @@ class BinaryOperations:
 
         return result
 
-    def get_xrefs_to_field(self, struct_name: str, field_name: str, *, view_id: str | None = None) -> list[dict[str, Any]]:
+    def get_xrefs_to_field(self, struct_name: str, field_name: str, *, view_id: str) -> list[dict[str, Any]]:
         """Get all cross references to a named struct field (member).
 
         This uses a best-effort heuristic:
@@ -3074,7 +2873,7 @@ class BinaryOperations:
 
         return results
 
-    def get_xrefs_to_type(self, type_name: str, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_xrefs_to_type(self, type_name: str, *, view_id: str) -> dict[str, Any]:
         """Get cross references/usages related to a struct/type name.
 
         Best-effort heuristics:
@@ -3177,7 +2976,7 @@ class BinaryOperations:
 
         return result
 
-    def get_xrefs_to_enum(self, enum_name: str, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_xrefs_to_enum(self, enum_name: str, *, view_id: str) -> dict[str, Any]:
         """Find usages of an enum by matching its member values in code and variables.
 
         Notes:
@@ -3295,7 +3094,7 @@ class BinaryOperations:
 
         return result
 
-    def get_xrefs_to_struct(self, struct_name: str, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_xrefs_to_struct(self, struct_name: str, *, view_id: str) -> dict[str, Any]:
         """Get cross references/usages related specifically to a struct name.
 
         Includes:
@@ -3686,7 +3485,7 @@ class BinaryOperations:
 
         return out
 
-    def get_xrefs_to_union(self, union_name: str, *, view_id: str | None = None) -> dict[str, Any]:
+    def get_xrefs_to_union(self, union_name: str, *, view_id: str) -> dict[str, Any]:
         """Get cross references/usages related to a union type by name.
 
         Includes:
@@ -3898,7 +3697,7 @@ class BinaryOperations:
         data: str | bytes | list[int],
         save_to_file: bool = True,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, Any]:
         """Patch bytes at a given address in the binary.
 

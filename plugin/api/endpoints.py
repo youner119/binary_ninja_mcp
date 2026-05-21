@@ -1,4 +1,3 @@
-import os
 from typing import Any
 
 import binaryninja as bn
@@ -10,54 +9,9 @@ class BinaryNinjaEndpoints:
     def __init__(self, binary_ops: BinaryOperations):
         self.binary_ops = binary_ops
 
-    def get_status(self) -> dict[str, Any]:
-        """Get the current status of the binary view.
-
-        The address-translation fields (image_base, original_image_base,
-        relocatable) let downstream tooling convert BN's static VAs to
-        RVAs and runtime addresses for PIE binaries — BN's image_base is
-        an analysis anchor, not the ASLR'd runtime base.
-        """
-        bv = self.binary_ops.current_view
-        return {
-            "loaded": bv is not None,
-            "filename": bv.file.filename if bv else None,
-            "image_base": bv.image_base if bv else None,
-            "original_image_base": bv.original_image_base if bv else None,
-            "relocatable": bv.relocatable if bv else None,
-        }
-
     def get_entry_points(self) -> list[dict[str, Any]]:
         """Get entry point(s) for the current binary"""
         return self.binary_ops.get_entry_points()
-
-    # -------- Multi-binary helpers --------
-    def _format_binary_listing(self, raw: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Normalize binary listing entries with ordinal, view id, basename, and selectors."""
-        formatted: list[dict[str, Any]] = []
-        for ordinal, item in enumerate(raw, start=1):
-            filename = item.get("filename")
-            view_id = str(item.get("id") or "")
-            basename = os.path.basename(filename) if filename else None
-            entry: dict[str, Any] = {
-                "id": str(ordinal),
-                "view_id": view_id,
-                "filename": filename,
-                "basename": basename,
-                "active": bool(item.get("active")),
-            }
-            selectors: list[str] = []
-            for candidate in (
-                entry["id"],
-                view_id,
-                filename,
-                basename,
-            ):
-                if candidate and candidate not in selectors:
-                    selectors.append(candidate)
-            entry["selectors"] = selectors
-            formatted.append(entry)
-        return formatted
 
     def create_view(self, filepath: str, view_id: str) -> dict:
         return self.binary_ops.create_view(filepath, view_id)
@@ -67,51 +21,6 @@ class BinaryNinjaEndpoints:
 
     def delete_view(self, view_id: str) -> dict:
         return self.binary_ops.delete_view(view_id)
-
-    def list_binaries(self) -> dict[str, Any]:
-        """List managed/open binaries with sequential ids (1..N) and active flag.
-
-        The server maintains internal keys for views; this endpoint presents
-        a user-friendly, 1-based index stable under sorting by filename.
-        """
-        raw = self.binary_ops.list_open_binaries()
-        return {"binaries": self._format_binary_listing(raw)}
-
-    def select_binary(self, ident: str) -> dict[str, Any]:
-        """Select active binary by id or filename/basename."""
-        info = self.binary_ops.select_view(ident)
-        if not info:
-            return {
-                "error": f"Binary not found: {ident}",
-                "available": self.list_binaries().get("binaries", []),
-            }
-        filename = info.get("filename")
-        view_id = info.get("id")
-        formatted = self._format_binary_listing(self.binary_ops.list_open_binaries())
-        selected_entry: dict[str, Any] | None = None
-        for entry in formatted:
-            if (filename and entry.get("filename") == filename) or (
-                view_id and entry.get("view_id") == view_id
-            ):
-                selected_entry = entry
-                break
-        if not selected_entry:
-            basename = os.path.basename(filename) if filename else None
-            selectors: list[str] = []
-            for candidate in (view_id, filename, basename):
-                if candidate and candidate not in selectors:
-                    selectors.append(candidate)
-            selected_entry = {
-                "id": None,
-                "view_id": view_id,
-                "filename": filename,
-                "basename": basename,
-                "active": True,
-                "selectors": selectors,
-            }
-        else:
-            selected_entry["active"] = True
-        return {"status": "ok", "selected": selected_entry}
 
     def get_function_info(self, identifier: str) -> dict[str, Any] | None:
         """Get detailed information about a function"""
@@ -130,7 +39,7 @@ class BinaryNinjaEndpoints:
         return self.binary_ops.get_callees(identifiers)
 
     def get_imports(
-        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+        self, offset: int = 0, limit: int = 100, *, view_id: str
     ) -> list[dict[str, Any]]:
         """Get list of imported functions"""
         bv = self.binary_ops._resolve_or_current(view_id)
@@ -148,7 +57,7 @@ class BinaryNinjaEndpoints:
         return imports[offset : offset + limit]
 
     def get_exports(
-        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+        self, offset: int = 0, limit: int = 100, *, view_id: str
     ) -> list[dict[str, Any]]:
         """Get list of exported symbols"""
         bv = self.binary_ops._resolve_or_current(view_id)
@@ -171,7 +80,7 @@ class BinaryNinjaEndpoints:
         return exports[offset : offset + limit]
 
     def get_namespaces(
-        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+        self, offset: int = 0, limit: int = 100, *, view_id: str
     ) -> list[str]:
         """Get list of C++ namespaces"""
         bv = self.binary_ops._resolve_or_current(view_id)
@@ -188,7 +97,7 @@ class BinaryNinjaEndpoints:
         return sorted_namespaces[offset : offset + limit]
 
     def get_defined_data(
-        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+        self, offset: int = 0, limit: int = 100, *, view_id: str
     ) -> list[dict[str, Any]]:
         """Get list of defined data variables"""
         bv = self.binary_ops._resolve_or_current(view_id)
@@ -225,7 +134,7 @@ class BinaryNinjaEndpoints:
         offset: int = 0,
         limit: int = 100,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> list[dict[str, Any]]:
         """Search functions by name"""
         bv = self.binary_ops._resolve_or_current(view_id)
@@ -357,7 +266,7 @@ class BinaryNinjaEndpoints:
                 ]
             return {"error": str(e), "available_platforms": platforms}
 
-    def define_types(self, c_code: str, *, view_id: str | None = None) -> dict[str, str]:
+    def define_types(self, c_code: str, *, view_id: str) -> dict[str, str]:
         """Define types from C code string
 
         Args:
@@ -392,7 +301,7 @@ class BinaryNinjaEndpoints:
         old_name: str,
         new_name: str,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, str]:
         """Rename a variable inside a function
 
@@ -436,7 +345,7 @@ class BinaryNinjaEndpoints:
         function_identifier: str | int,
         renames: list[dict[str, str]] | dict[str, str],
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, Any]:
         """Rename multiple local variables in a function.
 
@@ -601,7 +510,7 @@ class BinaryNinjaEndpoints:
         name: str,
         type_str: str,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, str]:
         """Retype a variable inside a function
 
@@ -645,7 +554,7 @@ class BinaryNinjaEndpoints:
         function_address: str | int,
         prototype: str,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, str]:
         """Set a function's prototype by address.
 
@@ -743,7 +652,7 @@ class BinaryNinjaEndpoints:
         }
 
     def declare_c_type(
-        self, c_declaration: str, *, view_id: str | None = None
+        self, c_declaration: str, *, view_id: str
     ) -> dict[str, Any]:
         """Create or update a local type from a single C declaration.
 
@@ -793,7 +702,7 @@ class BinaryNinjaEndpoints:
         variable_name: str,
         new_type: str,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, str]:
         """Set a local variable's type in a function.
 
@@ -876,7 +785,7 @@ class BinaryNinjaEndpoints:
         self,
         function_identifier: str | int,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> list[dict[str, Any]]:
         """Get stack frame variable information for a function.
 
@@ -986,7 +895,7 @@ class BinaryNinjaEndpoints:
         data: str | bytes | list[int],
         save_to_file: bool = True,
         *,
-        view_id: str | None = None,
+        view_id: str,
     ) -> dict[str, Any]:
         """Patch bytes at a given address in the binary.
 

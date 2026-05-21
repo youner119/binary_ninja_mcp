@@ -15,15 +15,6 @@ const viewIdField = {
 };
 
 export function registerTools(server: McpServer, client: BinjaHttpClient): void {
-  // Helper function to get active filename
-  async function getActiveFilename(): Promise<string> {
-    const data = await client.getJson<{ filename?: string }>("status");
-    if (data && typeof data === "object" && "filename" in data) {
-      return (data as { filename: string }).filename || "(none)";
-    }
-    return "(none)";
-  }
-
   // ===== Function Analysis Tools =====
 
   server.tool(
@@ -35,10 +26,9 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       limit: z.number().default(100).describe("Number of results to return"),
     },
     async ({ view_id, offset = 0, limit = 100 }) => {
-      const filename = await getActiveFilename();
       const lines = await client.getLines("methods", { view_id, offset, limit });
       return {
-        content: [{ type: "text", text: `File: ${filename}\n${lines.join("\n")}` }],
+        content: [{ type: "text", text: lines.join("\n") }],
       };
     }
   );
@@ -90,16 +80,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       name: z.string().describe("Function name or address"),
     },
     async ({ view_id, name }) => {
-      const filename = await getActiveFilename();
       const data = await client.getJson<{ decompiled?: string; error?: string }>("decompile", { view_id, name });
       if (!data) {
-        return { content: [{ type: "text", text: `File: ${filename}\n\nError: no response` }] };
+        return { content: [{ type: "text", text: "Error: no response" }] };
       }
       if ("error" in data) {
-        return { content: [{ type: "text", text: `File: ${filename}\n\nError: ${data.error}` }] };
+        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
       }
       const decompiled = (data as { decompiled?: string }).decompiled;
-      return { content: [{ type: "text", text: `File: ${filename}\n\n${decompiled || ""}` }] };
+      return { content: [{ type: "text", text: decompiled || "" }] };
     }
   );
 
@@ -190,7 +179,6 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       ssa: z.boolean().default(false).describe("Request SSA form (MLIL/LLIL only)"),
     },
     async ({ view_id, name_or_address, view = "hlil", ssa = false }) => {
-      const filename = await getActiveFilename();
       const ident = name_or_address.trim();
       const params: Record<string, string | number> = { view_id, view, ssa: ssa ? 1 : 0 };
       if (ident.toLowerCase().startsWith("0x") || /^\d+$/.test(ident)) {
@@ -200,13 +188,13 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       }
       const data = await client.getJson<{ il?: string; error?: unknown }>("il", params);
       if (!data) {
-        return { content: [{ type: "text", text: `File: ${filename}\n\nError: no response` }] };
+        return { content: [{ type: "text", text: "Error: no response" }] };
       }
       if ("error" in data) {
-        return { content: [{ type: "text", text: `File: ${filename}\n\nError: ${JSON.stringify(data.error)}` }] };
+        return { content: [{ type: "text", text: `Error: ${JSON.stringify(data.error)}` }] };
       }
       const il = (data as { il?: string }).il;
-      return { content: [{ type: "text", text: `File: ${filename}\n\n${il || ""}` }] };
+      return { content: [{ type: "text", text: il || "" }] };
     }
   );
 
@@ -218,16 +206,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       name: z.string().describe("Function name"),
     },
     async ({ view_id, name }) => {
-      const filename = await getActiveFilename();
       const data = await client.getJson<{ assembly?: string; error?: string }>("assembly", { view_id, name });
       if (!data) {
-        return { content: [{ type: "text", text: `File: ${filename}\n\nError: no response` }] };
+        return { content: [{ type: "text", text: "Error: no response" }] };
       }
       if ("error" in data) {
-        return { content: [{ type: "text", text: `File: ${filename}\n\nError: ${(data as { error: string }).error}` }] };
+        return { content: [{ type: "text", text: `Error: ${(data as { error: string }).error}` }] };
       }
       const assembly = (data as { assembly?: string }).assembly;
-      return { content: [{ type: "text", text: `File: ${filename}\n\n${assembly || ""}` }] };
+      return { content: [{ type: "text", text: assembly || "" }] };
     }
   );
 
@@ -906,9 +893,8 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       if (!data || "error" in data) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
-      const filename = await getActiveFilename();
       const sections = (data as { sections?: Array<Record<string, unknown>> }).sections || [];
-      const lines = [`File: ${filename}`];
+      const lines: string[] = [];
       for (const s of sections) {
         const start = (s as { start?: string }).start || "";
         const end = (s as { end?: string }).end || "";
@@ -1012,102 +998,6 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
         offset += batch_size;
       }
       return { content: [{ type: "text", text: results.join("\n") }] };
-    }
-  );
-
-  server.tool(
-    "get_binary_status",
-    "Get the current status of the loaded binary.",
-    {},
-    async () => {
-      const lines = await client.getLines("status");
-      return { content: [{ type: "text", text: lines[0] || "" }] };
-    }
-  );
-
-  server.tool(
-    "load_binary",
-    "Load a binary file into Binary Ninja for analysis. Can also load .bndb files. " +
-    "Call this before any analysis if no binary is loaded (get_binary_status shows loaded=false).",
-    {
-      filepath: z.string().describe("Absolute path to the binary or .bndb file to load"),
-    },
-    async ({ filepath }) => {
-      const raw = await client.post("load", { filepath });
-      let data: Record<string, unknown>;
-      try {
-        data = JSON.parse(raw);
-      } catch {
-        return { content: [{ type: "text", text: raw.startsWith("Error") ? raw : `Binary loaded: ${filepath}` }] };
-      }
-      if (data.error) {
-        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
-      }
-      return {
-        content: [{ type: "text", text: `Binary loaded: ${filepath}` }],
-      };
-    }
-  );
-
-  server.tool(
-    "list_binaries",
-    "List managed/open binaries known to the server with ids and active flag.",
-    {},
-    async () => {
-      const data = await client.getJson<{ error?: string; binaries?: Array<Record<string, unknown>> }>("binaries");
-      if (!data) {
-        return { content: [{ type: "text", text: "Error: no response" }] };
-      }
-      if ("error" in data) {
-        return { content: [{ type: "text", text: (data as { error: string }).error }] };
-      }
-      const binaries = (data as { binaries?: Array<Record<string, unknown>> }).binaries || [];
-      const lines = binaries.map((it) => {
-        const vid = (it as { id?: number }).id;
-        const view_id = (it as { view_id?: number }).view_id;
-        const fn = (it as { filename?: string }).filename;
-        const basename = (it as { basename?: string }).basename || "";
-        const selectors = (it as { selectors?: number[] }).selectors || [];
-        const active = (it as { active?: boolean }).active;
-        const label = basename || fn || "(unknown)";
-        const full = fn || "(no filename)";
-        const selectorText = selectors.map(String).join(", ");
-        const mark = active ? " *active*" : "";
-        const viewPart = view_id ? ` view=${view_id}` : "";
-        return `${vid}. ${label}${viewPart}${mark}\n    path: ${full}\n    selectors: ${selectorText}`;
-      });
-      return { content: [{ type: "text", text: lines.join("\n") }] };
-    }
-  );
-
-  server.tool(
-    "select_binary",
-    "Select which binary to analyze by ordinal, internal view id, full path, or basename.",
-    {
-      view: z.string().describe("Ordinal, view id, full path, or basename"),
-    },
-    async ({ view }) => {
-      const data = await client.getJson<{ error?: string; selected?: Record<string, unknown> }>("selectBinary", { view });
-      if (!data) {
-        return { content: [{ type: "text", text: "Error: no response" }] };
-      }
-      if ("error" in data) {
-        return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
-      }
-      const sel = (data as { selected?: Record<string, unknown> }).selected;
-      if (sel) {
-        const ordinal = (sel as { id?: number }).id || "?";
-        const view_id = (sel as { view_id?: number }).view_id;
-        const fn = (sel as { filename?: string }).filename || "";
-        const basename = (sel as { basename?: string }).basename || "";
-        const selectors = (sel as { selectors?: number[] }).selectors || [];
-        const selectorText = selectors.map(String).join(", ");
-        const displayName = basename || fn || "(unknown)";
-        const viewPart = view_id ? ` (view ${view_id})` : "";
-        const pathPart = fn ? `\nFull path: ${fn}` : "";
-        return { content: [{ type: "text", text: `Selected ${ordinal}: ${displayName}${viewPart}${pathPart}\nSelectors: ${selectorText}` }] };
-      }
-      return { content: [{ type: "text", text: JSON.stringify(data) }] };
     }
   );
 
