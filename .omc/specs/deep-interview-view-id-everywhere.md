@@ -48,7 +48,7 @@ Binary Ninja MCP 서버를 **싱글 활성 view** 모델에서 **명시적 view_
 
 - `view_id`는 **사용자 지정 alias 문자열** (예: `"crackme1"`)
 - `view_id`는 **전역 고유 키**: 같은 view_id로 두 번째 `create_view` 시도 → 409/error
-- **같은 파일 서로 다른 view_id로 열기는 허용** (독립된 리버싱 세션)
+- **같은 파일을 두 번 열기는 거부** (Phase 1 게이트 검증 중 결정 — BN이 동일 파일에 대한 두 번째 `bn.load`에서 기존 BV를 reload/대체하여 진정한 독립 BV 불가. spec 초안의 "같은 파일 다른 alias 허용"은 BN 한계로 불가능). 같은 파일에 대해 두 번째 `create_view` 시도 → 409 + `"file already loaded as view_id=<existing>"`
 - `delete_view`는 **BN 내부에서도 BV 완전 언로드** (`bv.file.close()` 또는 동등 호출) — 저장 안 된 분석 결과는 손실
 - **모든 60개 MCP 도구가 view_id 필수** — 누락 시 400 에러
 - "활성 view" 전역 상태 완전 제거 (`_current_view` 폐기)
@@ -69,7 +69,7 @@ Binary Ninja MCP 서버를 **싱글 활성 view** 모델에서 **명시적 view_
 ### view-crud
 - [ ] **AC-1**: `create_view(filepath, view_id="X")` 호출 시 view_id 문자열을 반환하고, BV가 BN에 로드되어 `_views_by_id`에 등록된다.
 - [ ] **AC-2**: 동일 view_id로 두 번째 `create_view` 호출 → HTTP 409 / MCP error 응답.
-- [ ] **AC-3**: 같은 filepath를 서로 다른 view_id로 두 번 호출 → 두 번 모두 성공하고, 두 개의 독립 BV 인스턴스가 메모리에 존재한다.
+- [ ] **AC-3**: 같은 filepath를 두 번째 `create_view`로 호출 → HTTP 409 + 응답 메시지에 기존 view_id 포함 (`"file already loaded as view_id='X'"`). Phase 1 게이트 중 BN 한계 확인되어 spec 초안의 "둘 다 성공" 의미에서 변경됨.
 - [ ] **AC-4**: `list_view()` → 등록된 모든 view의 목록 반환 (각 항목: `view_id`, `filepath`, `basename`, `arch`, `size` 등).
 - [ ] **AC-5**: `delete_view(view_id)` → 해당 BV가 BN에서 unload되고 (`bv.file.close()` 동등 호출), `_views_by_id`에서 제거되며, 후속 호출 시 view-not-found 에러.
 

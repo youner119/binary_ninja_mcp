@@ -9,7 +9,7 @@ import binaryninja as bn
 from binaryninja.settings import Settings
 
 from ..api.endpoints import BinaryNinjaEndpoints
-from ..core.binary_operations import AnalysisNotReady, BinaryOperations
+from ..core.binary_operations import AnalysisNotReady, BinaryOperations, ViewNotFound
 from ..core.config import Config
 from ..utils.number_utils import convert_number as util_convert_number
 from ..utils.string_utils import parse_int_or_default
@@ -239,7 +239,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            # For all endpoints except /status, /convertNumber, /platforms, /binaries, /views, /selectBinary, check loaded
+            # For all endpoints except /status, /convertNumber, /platforms, /binaries, /views, /selectBinary, /listView, check loaded
             if (
                 not (
                     self.path.startswith("/status")
@@ -248,6 +248,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     or self.path.startswith("/binaries")
                     or self.path.startswith("/views")
                     or self.path.startswith("/selectBinary")
+                    or self.path.startswith("/listView")
                 )
                 and not self._check_binary_loaded()
             ):
@@ -1991,9 +1992,24 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     bn.log_error(f"Error handling patch request: {e}")
                     self._send_json_response({"error": str(e)}, 500)
+            elif path == "/listView":
+                self._send_json_response(self.endpoints.list_view())
+
             else:
                 self._send_json_response({"error": "Not found"}, 404)
 
+        except ViewNotFound as nf:
+            self._send_json_response(
+                {"error": str(nf), "view_id": nf.view_id}, 404
+            )
+        except ValueError as ve:
+            self._send_json_response({"error": str(ve)}, 400)
+        except FileNotFoundError as fnf:
+            # create_view: filepath not found
+            self._send_json_response({"error": str(fnf)}, 400)
+        except FileExistsError as fee:
+            # create_view: duplicate view_id
+            self._send_json_response({"error": str(fee)}, 409)
         except AnalysisNotReady as nr:
             self._send_json_response(nr.progress, 202)
         except Exception as e:
@@ -2054,8 +2070,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
         try:
             path = urllib.parse.urlparse(self.path).path
 
-            # /load must work without a binary already open
-            if path != "/load" and not self._check_binary_loaded():
+            # /load, /createView, /deleteView must work without a binary already open
+            if path not in ("/load", "/createView", "/deleteView") and not self._check_binary_loaded():
                 return
 
             params = self._parse_post_params()
@@ -2485,8 +2501,46 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     bn.log_error(f"Error handling patch request: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
+            elif path == "/createView":
+                filepath = params.get("filepath")
+                view_id = params.get("view_id")
+                if not filepath:
+                    self._send_json_response({"error": "filepath required"}, 400)
+                    return
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                try:
+                    result = self.endpoints.create_view(filepath, view_id)
+                    self._send_json_response(result)
+                except RuntimeError as re:
+                    # bn.load failure
+                    self._send_json_response(
+                        {"error": str(re), "filepath": filepath}, 422
+                    )
+
+            elif path == "/deleteView":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                result = self.endpoints.delete_view(view_id)
+                self._send_json_response(result)
+
             else:
                 self._send_json_response({"error": "Not found"}, 404)
+        except ViewNotFound as nf:
+            self._send_json_response(
+                {"error": str(nf), "view_id": nf.view_id}, 404
+            )
+        except ValueError as ve:
+            self._send_json_response({"error": str(ve)}, 400)
+        except FileNotFoundError as fnf:
+            # create_view: filepath not found
+            self._send_json_response({"error": str(fnf)}, 400)
+        except FileExistsError as fee:
+            # create_view: duplicate view_id
+            self._send_json_response({"error": str(fee)}, 409)
         except AnalysisNotReady as nr:
             self._send_json_response(nr.progress, 202)
         except Exception as e:

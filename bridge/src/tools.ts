@@ -6,6 +6,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BinjaHttpClient } from "./client.js";
 
+// View-id field shared across multi-session tools (Phase 2 will add it to all 60 tools).
+const viewIdField = {
+  view_id: z.string().describe(
+    "Target view alias (from create_view). Required — each call must explicitly " +
+    "specify which view to operate on. Use list_view to see registered views."
+  ),
+};
+
 export function registerTools(server: McpServer, client: BinjaHttpClient): void {
   // Helper function to get active filename
   async function getActiveFilename(): Promise<string> {
@@ -1044,6 +1052,47 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
         return { content: [{ type: "text", text: `Selected ${ordinal}: ${displayName}${viewPart}${pathPart}\nSelectors: ${selectorText}` }] };
       }
       return { content: [{ type: "text", text: JSON.stringify(data) }] };
+    }
+  );
+
+  server.tool(
+    "create_view",
+    "Load a binary file and register it under a user-specified view_id alias. " +
+    "The view_id is used to target this view in subsequent tool calls. " +
+    "Returns 409 if view_id already exists, or if the same filepath is already " +
+    "loaded under a different view_id (use list_view to find the existing alias).",
+    {
+      filepath: z.string().describe("Absolute path to the binary file"),
+      view_id: z.string().describe("User-assigned alias for this view (must be globally unique)"),
+    },
+    async ({ filepath, view_id }) => {
+      const data = await client.post("createView", { filepath, view_id });
+      return { content: [{ type: "text", text: data }] };
+    }
+  );
+
+  server.tool(
+    "list_view",
+    "List all currently registered views (open binaries). Returns view_id, filepath, " +
+    "basename, arch, and analysis_state for each.",
+    {},
+    async () => {
+      const data = await client.getText("listView");
+      return { content: [{ type: "text", text: data }] };
+    }
+  );
+
+  server.tool(
+    "delete_view",
+    "Close the BinaryView for the given view_id and unregister it. " +
+    "WARNING: any unsaved analysis (renames, comments, types) is lost — " +
+    "call save_bndb first if you need to preserve work.",
+    {
+      view_id: z.string().describe("view_id from create_view or list_view"),
+    },
+    async ({ view_id }) => {
+      const data = await client.post("deleteView", { view_id });
+      return { content: [{ type: "text", text: data }] };
     }
   );
 

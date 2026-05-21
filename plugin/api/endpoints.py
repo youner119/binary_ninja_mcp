@@ -59,6 +59,15 @@ class BinaryNinjaEndpoints:
             formatted.append(entry)
         return formatted
 
+    def create_view(self, filepath: str, view_id: str) -> dict:
+        return self.binary_ops.create_view(filepath, view_id)
+
+    def list_view(self) -> dict:
+        return self.binary_ops.list_view_info()
+
+    def delete_view(self, view_id: str) -> dict:
+        return self.binary_ops.delete_view(view_id)
+
     def list_binaries(self) -> dict[str, Any]:
         """List managed/open binaries with sequential ids (1..N) and active flag.
 

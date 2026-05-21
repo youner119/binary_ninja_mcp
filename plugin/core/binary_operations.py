@@ -28,6 +28,17 @@ class AnalysisNotReady(BaseException):
         super().__init__(progress.get("hint", "Analysis still running"))
 
 
+class ViewNotFound(Exception):
+    """Raised when view_id does not match any registered BinaryView.
+
+    HTTP handler converts this to a 404 response.
+    """
+
+    def __init__(self, view_id: str):
+        self.view_id = view_id
+        super().__init__(f"view not found: {view_id!r}")
+
+
 class BinaryOperations:
     def __init__(self, config: BinaryNinjaConfig):
         self.config = config
@@ -35,6 +46,12 @@ class BinaryOperations:
         # Multi-binary support
         # Store weak references so closed views are auto-pruned
         self._views_by_id: dict[str, weakref.ReferenceType] = {}
+        # Strong references for views created via create_view(). Without this,
+        # the only reference returned by bn.load() goes out of scope at the end
+        # of create_view and the BV is garbage-collected, defeating duplicate
+        # detection. Legacy views opened through the BN UI stay alive via the
+        # UI tab; explicit MCP-created views need their own anchor.
+        self._strong_views: dict[str, bn.BinaryView] = {}
         self._next_view_id: int = 1
         self._id_by_filename: dict[str, str] = {}
 
@@ -253,6 +270,205 @@ class BinaryOperations:
             self._current_view = None
         self._prune_views()
         return len(to_delete)
+
+    def resolve_view(self, view_id: str) -> bn.BinaryView:
+        """Resolve view_id alias to the live BinaryView object.
+
+        Args:
+            view_id: user-assigned alias from create_view (or legacy register).
+
+        Raises:
+            ValueError: view_id is empty/None — mapped to HTTP 400.
+            ViewNotFound: alias is not registered or refers to a dead view —
+                mapped to HTTP 404.
+
+        Returns:
+            Live BinaryView.
+        """
+        if not view_id or not isinstance(view_id, str):
+            raise ValueError("view_id required (non-empty string)")
+        self._prune_views()
+        w = self._views_by_id.get(view_id)
+        if w is None:
+            raise ViewNotFound(view_id)
+        bv = w()
+        if bv is None:
+            self._views_by_id.pop(view_id, None)
+            raise ViewNotFound(view_id)
+        return bv
+
+    def _view_info(self, bv: bn.BinaryView, view_id: str, *, summary: bool = False) -> dict:
+        """Build the response schema for create_view / list_view.
+
+        summary=True: list_view에서 사용하는 간결 schema
+        summary=False: create_view에서 사용하는 풀 schema
+        """
+        import os
+        filename = None
+        try:
+            filename = getattr(bv.file, "filename", None)
+        except Exception:
+            pass
+        basename = os.path.basename(filename) if filename else None
+        arch_name = None
+        try:
+            arch_name = bv.arch.name if bv.arch else None
+        except Exception:
+            pass
+        platform_name = None
+        try:
+            platform_name = bv.platform.name if bv.platform else None
+        except Exception:
+            pass
+        state_name = None
+        pct = None
+        try:
+            state = bv.analysis_info.state
+            state_name = getattr(state, "name", None) or str(state).rsplit(".", 1)[-1]
+        except Exception:
+            pass
+        try:
+            prog = bv.analysis_progress
+            if prog and int(getattr(prog, "total", 0) or 0) > 0:
+                pct = int(prog.count) * 100 // int(prog.total)
+        except Exception:
+            pass
+
+        entry = {
+            "view_id": view_id,
+            "filepath": filename,
+            "basename": basename,
+            "arch": arch_name,
+            "analysis_state": state_name,
+        }
+        if not summary:
+            # full schema for create_view: + platform, entry_point, progress_pct
+            entry_point = None
+            try:
+                ep = bv.entry_point
+                if ep is not None:
+                    entry_point = hex(int(ep))
+            except Exception:
+                pass
+            entry["platform"] = platform_name
+            entry["entry_point"] = entry_point
+            entry["analysis_progress_pct"] = pct
+        return entry
+
+    def create_view(self, filepath: str, view_id: str) -> dict:
+        """Load a binary and register it under the user-specified view_id alias.
+
+        Spec contract:
+            - view_id must be unique globally (Decision: duplicate -> 409).
+            - Same filepath with a different view_id is allowed (independent sessions).
+            - filepath not found -> 400.
+            - bn.load failure -> 422 (raise an exception caught at HTTP layer).
+
+        Returns the full create_view schema (see Decision 5).
+        """
+        import os
+        if not view_id or not isinstance(view_id, str):
+            raise ValueError("view_id required (non-empty string)")
+        if not filepath or not isinstance(filepath, str):
+            raise ValueError("filepath required (non-empty string)")
+        self._prune_views()
+        if view_id in self._views_by_id:
+            # Existing alias — must be a 409 at HTTP layer
+            raise FileExistsError(f"view_id already exists: {view_id!r}")
+        if not os.path.isfile(filepath):
+            raise FileNotFoundError(f"filepath not found: {filepath!r}")
+        # BN reloads/replaces the BinaryView when bn.load is called twice for the
+        # same path, so multiple aliases on one filepath would silently overwrite
+        # the first. Reject the duplicate with a 409 that points the caller at
+        # the existing view_id.
+        abs_path = os.path.abspath(filepath)
+        for existing_vid, w in list(self._views_by_id.items()):
+            try:
+                existing_bv = w()
+            except Exception:
+                existing_bv = None
+            if existing_bv is None:
+                continue
+            try:
+                existing_fn = getattr(existing_bv.file, "filename", None)
+            except Exception:
+                existing_fn = None
+            if existing_fn and os.path.abspath(str(existing_fn)) == abs_path:
+                raise FileExistsError(
+                    f"file already loaded as view_id={existing_vid!r}: {filepath!r}"
+                )
+
+        bn.log_info(f"create_view: loading {filepath} as view_id={view_id!r}")
+        bv = bn.load(filepath, update_analysis=False)
+        if bv is None:
+            raise RuntimeError(f"bn.load returned None for {filepath!r}")
+
+        # Register under user-specified alias directly (do not auto-generate)
+        self._views_by_id[view_id] = weakref.ref(bv)
+        self._strong_views[view_id] = bv
+        try:
+            fn = getattr(bv.file, "filename", None)
+            if fn:
+                # Note: _id_by_filename now maps filename -> "last registered view_id"
+                # for THIS filename. Multiple aliases per file are allowed; this map
+                # just remembers one (used by legacy paths).
+                self._id_by_filename[str(fn)] = view_id
+        except Exception:
+            pass
+
+        # Kick off analysis in background (non-blocking).
+        try:
+            bv.update_analysis()
+        except Exception:
+            pass
+
+        return self._view_info(bv, view_id, summary=False)
+
+    def list_view_info(self) -> dict:
+        """Return the list_view response: array of summary view info entries."""
+        self._prune_views()
+        views = []
+        for vid, w in self._views_by_id.items():
+            try:
+                bv = w()
+            except Exception:
+                bv = None
+            if bv is None:
+                continue
+            views.append(self._view_info(bv, vid, summary=True))
+        # Stable order by view_id
+        views.sort(key=lambda e: e.get("view_id") or "")
+        return {"views": views}
+
+    def delete_view(self, view_id: str) -> dict:
+        """Close the BinaryView and remove the view_id registration.
+
+        Per spec Decision (Round 3): close the underlying file in BN
+        (bv.file.close()) — unsaved analysis is lost.
+
+        Returns: {"view_id": <view_id>, "deleted": True}
+        """
+        bv = self.resolve_view(view_id)  # raises ValueError / ViewNotFound
+        try:
+            fn = getattr(bv.file, "filename", None)
+        except Exception:
+            fn = None
+        # Close in BN — releases memory; unsaved analysis lost.
+        try:
+            bv.file.close()
+            bn.log_info(f"delete_view: closed BN file for view_id={view_id!r}")
+        except Exception as exc:
+            bn.log_warn(f"delete_view: bv.file.close() failed for {view_id!r}: {exc}")
+        # Remove from registry — dropping the strong ref allows GC after BN closes its handle.
+        self._views_by_id.pop(view_id, None)
+        self._strong_views.pop(view_id, None)
+        # Clean filename map if this view_id was the latest for that filename
+        if fn and self._id_by_filename.get(str(fn)) == view_id:
+            self._id_by_filename.pop(str(fn), None)
+        # Clear current_view if it matched (transient — Phase 3 removes _current_view).
+        if self._current_view is not None and self._current_view is bv:
+            self._current_view = None
+        return {"view_id": view_id, "deleted": True}
 
     def list_open_binaries(self) -> list[dict[str, str]]:
         """Return a list of managed/open binaries with ids.
