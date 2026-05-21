@@ -156,4 +156,4 @@ DELETE on `/comment` and `/comment/function` is exposed over POST by adding `_me
 
 ## Upstream documentation
 
-For everything not listed above — Plugin Manager listing, the `npx binary-ninja-mcp` npm flow (note: not yet v2-aligned), the CTF demo video, Ruff configuration, GitHub Actions setup, contributing guidelines — see the upstream README at <https://github.com/fosdickio/binary_ninja_mcp>.
+This is a **local-only fork** — not published to npm or the Plugin Manager. For everything not listed above — the upstream's `npx binary-ninja-mcp` npm flow, Plugin Manager listing, the CTF demo video, Ruff configuration, GitHub Actions setup, contributing guidelines — see the upstream README at <https://github.com/fosdickio/binary_ninja_mcp>.

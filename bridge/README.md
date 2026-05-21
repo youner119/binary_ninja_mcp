@@ -37,7 +37,7 @@ MCP client configuration (`~/.claude.json` or equivalent):
 }
 ```
 
-The upstream's published `npx -y binary-ninja-mcp` npm package still serves v1 tool names and is **not compatible with this fork's plugin** (v2 requires `view_id` on every analysis call). Use the locally-built `dist/index.js` from this repo until an aligned npm release exists.
+This fork is **local-only** — not published to npm. The upstream's `npx -y binary-ninja-mcp` package still ships v1 tool names and is incompatible with this fork's v2 plugin (every analysis call requires `view_id`). Use the locally-built `dist/index.js` from this repo.
 
 ## Tool catalog (this fork)
 
@@ -51,7 +51,7 @@ See the [main `README.md`](../README.md#supported-capabilities-this-fork) for th
 | Active binary | Implicit (via `select_binary`) | Explicit `view_id` on every call |
 | `client.post("comment", ...)` semantics | One verb per route | POST body `_method: "DELETE"` for delete-on-shared-path routes |
 | `get_stack_frame_vars` output | Joined string | `JSON.stringify` of full server response |
-| Distribution | Published as `npx binary-ninja-mcp` | Local build only (`bridge/dist/index.js`) — npm release not yet aligned with v2 plugin |
+| Distribution | Published as `npx binary-ninja-mcp` | Local build only (`bridge/dist/index.js`) — this is a private fork, not published to npm |
 
 ## Upstream documentation
 
