@@ -22,6 +22,24 @@ class BinaryNinjaEndpoints:
     def delete_view(self, view_id: str) -> dict:
         return self.binary_ops.delete_view(view_id)
 
+    def list_platforms(self) -> dict:
+        """View-agnostic: list all BN-registered platform names.
+
+        Phase 3 cleanup removed this method by mistake while pruning legacy
+        view-management endpoints; restored here so the /platforms route
+        (still wired in http_server.py) stops returning 500.
+        """
+        names: list[str] = []
+        try:
+            for p in bn.Platform.list:
+                try:
+                    names.append(p.name)
+                except Exception:
+                    continue
+        except Exception as e:
+            bn.log_error(f"list_platforms enumeration failed: {e}")
+        return {"platforms": names}
+
     def get_function_info(self, identifier: str) -> dict[str, Any] | None:
         """Get detailed information about a function"""
         try:

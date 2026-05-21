@@ -826,15 +826,18 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
       const params: Record<string, string> = ident.toLowerCase().startsWith("0x") || /^\d+$/.test(ident)
         ? { view_id, address: ident }
         : { view_id, name: ident };
-      const data = await client.getJson<{ error?: string; stack_frame_vars?: string[] }>("getStackFrameVars", params);
-      if (!data) {
-        return { content: [{ type: "text", text: "" }] };
+      // Server returns a list[{addr, vars: [{name, offset, size, type}, ...]}],
+      // not the {stack_frame_vars: string[]} the old handler expected. Stringify
+      // the JSON response so the LLM sees the real shape instead of "[object Object]".
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await client.getJson("getStackFrameVars", params);
+      if (data === null || data === undefined) {
+        return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
       }
-      if ("error" in data) {
-        return { content: [{ type: "text", text: "" }] };
+      if (typeof data === "object" && "error" in data && data.error) {
+        return { content: [{ type: "text", text: `Error: ${data.error}` }] };
       }
-      const vars = (data as { stack_frame_vars?: string[] }).stack_frame_vars;
-      return { content: [{ type: "text", text: (vars || []).join("\n") }] };
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
   );
 

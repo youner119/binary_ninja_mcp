@@ -2218,6 +2218,15 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
             params = self._parse_post_params()
 
+            # Bridge ships every request as POST (axios) but some routes share
+            # a path across verbs — e.g. /comment handles GET/POST/DELETE.
+            # Honor a `_method` field in the JSON body so callers can simulate
+            # DELETE without a separate HTTP method. The branch dispatch below
+            # already checks self.command == "DELETE".
+            override = (params.get("_method") or "").upper()
+            if override in ("DELETE", "GET"):
+                self.command = override
+
             bn.log_info(f"POST {path} with params: {params}")
 
             if path == "/rename/function" or path == "/renameFunction":

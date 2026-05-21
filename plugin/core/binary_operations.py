@@ -2183,15 +2183,23 @@ class BinaryOperations:
         return False
 
     def delete_function_comment(self, identifier: str | int, *, view_id: str) -> bool:
-        """Delete a comment for a function"""
-        self._resolve_or_current(view_id)  # validates view exists
+        """Delete a comment for a function.
+
+        set_function_comment writes via ``bv.set_comment_at(func.start, ...)``
+        and get_function_comment reads via ``bv.get_comment_at(func.start)``,
+        so deletion must clear the same BinaryView-level address comment.
+        The previous implementation used ``func.comment = None`` (Function
+        property), a different storage path — set/delete didn't roundtrip
+        and the comment survived the "delete".
+        """
+        bv = self._resolve_or_current(view_id)
 
         try:
             func = self.get_function_by_name_or_address(identifier, view_id=view_id)
             if not func:
                 return False
 
-            func.comment = None
+            bv.set_comment_at(func.start, None)
             return True
         except Exception as e:
             bn.log_error(f"Failed to delete function comment: {e}")
