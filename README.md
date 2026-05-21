@@ -34,7 +34,7 @@ cd ~/.binaryninja/plugins/binary_ninja_mcp/bridge
 npm install && npm run build
 ```
 
-Then configure your MCP client to launch the **TypeScript bridge** (the upstream's Python bridge is not maintained in this fork; legacy v1 tool names won't work against the v2 plugin):
+Then configure your MCP client to launch the **TypeScript bridge** (this fork is TS-only — the upstream's Python bridge has been removed because its legacy v1 tool names are incompatible with the v2 plugin):
 
 ```json
 {
@@ -152,8 +152,8 @@ DELETE on `/comment` and `/comment/function` is exposed over POST by adding `_me
 | Tool signatures | No view selector | First argument is `view_id` on every analysis tool |
 | HTTP server | `HTTPServer` (single-threaded) | `ThreadingHTTPServer` |
 | Long-running analysis | Blocks until done (or times out) | Returns `202` with progress payload after ~5s |
-| Python bridge | Maintained as one of two entry points | Not maintained — use the TypeScript bridge |
+| Python bridge | Maintained as one of two entry points | Removed — TypeScript bridge is the only entry point |
 
 ## Upstream documentation
 
-For everything not listed above — Plugin Manager listing, auto-setup scripts, the `npx binary-ninja-mcp` npm flow, the Python bridge config, the CTF demo video, Ruff configuration, GitHub Actions setup, contributing guidelines — see the upstream README at <https://github.com/fosdickio/binary_ninja_mcp>.
+For everything not listed above — Plugin Manager listing, the `npx binary-ninja-mcp` npm flow (note: not yet v2-aligned), the CTF demo video, Ruff configuration, GitHub Actions setup, contributing guidelines — see the upstream README at <https://github.com/fosdickio/binary_ninja_mcp>.

@@ -3,24 +3,6 @@ import json
 import os
 import sys
 
-# Import shared utilities
-try:
-    # Try relative import first (when run as module)
-    from ..plugin.utils.python_detection import (
-        copy_python_env,
-        create_venv_with_system_python,
-        get_python_executable,
-    )
-except ImportError:
-    # Fallback for direct script execution
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugin"))
-    from utils.python_detection import (
-        copy_python_env,
-        create_venv_with_system_python,
-        get_python_executable,
-    )
-
-
 # Unique key used in MCP client configs
 MCP_SERVER_KEY = "binary_ninja_mcp"
 
@@ -31,52 +13,30 @@ def _repo_root() -> str:
 
 
 def _bridge_entrypoint() -> str:
-    return os.path.join(_repo_root(), "bridge", "binja_mcp_bridge.py")
+    return os.path.join(_repo_root(), "bridge", "dist", "index.js")
 
 
-def _venv_dir() -> str:
-    return os.path.join(_repo_root(), ".venv")
+def _node_executable() -> str:
+    """Resolve absolute path to a Node.js binary.
 
-
-def _venv_python() -> str:
-    d = _venv_dir()
-    if sys.platform == "win32":
-        # Always prefer a real Python interpreter for MCP stdio servers.
-        # "binaryninja.exe" is an embedded interpreter launcher and does not
-        # behave like a normal Python on stdio, causing MCP clients to fail.
-        py = os.path.join(d, "Scripts", "python.exe")
-        return py
-    return os.path.join(d, "bin", "python3")
-
-
-def ensure_local_venv() -> str:
-    """Create a local venv under the plugin root if missing and return its python."""
-    vdir = _venv_dir()
-    req = os.path.join(_repo_root(), "bridge", "requirements.txt")
-
-    try:
-        py = create_venv_with_system_python(vdir, req if os.path.exists(req) else None)
-        return py if os.path.exists(py) else get_python_executable()
-    except Exception:
-        return get_python_executable()
-
-
-# Note: get_python_executable and copy_python_env are now imported from utils.python_detection
+    Prefers shutil.which(), falls back to the bare "node" name (lets MCP
+    client resolve via PATH). Returning "node" is acceptable because most
+    MCP clients are launched from a login shell that has Node on PATH.
+    """
+    import shutil
+    return shutil.which("node") or "node"
 
 
 def print_mcp_config():
     """Print a generic MCP config snippet users can copy to unsupported clients."""
     mcp_config = {
-        "command": ensure_local_venv(),
+        "command": _node_executable(),
         "args": [
             _bridge_entrypoint(),
         ],
         "timeout": 1800,
         "disabled": False,
     }
-    env = {}
-    if copy_python_env(env):
-        mcp_config["env"] = env
     print(json.dumps({"mcpServers": {MCP_SERVER_KEY: mcp_config}}, indent=2))
 
 
@@ -186,13 +146,12 @@ def _config_targets() -> dict[str, tuple[str, str]]:
 
 
 def install_mcp_servers(
-    *, uninstall: bool = False, quiet: bool = False, env: dict[str, str] | None = None
+    *, uninstall: bool = False, quiet: bool = False
 ) -> int:
     """Install or remove MCP server entries for supported clients.
 
     Returns the number of configs modified.
     """
-    env = {} if env is None else dict(env)
     targets = _config_targets()
     if not targets:
         if not quiet:
@@ -231,24 +190,12 @@ def install_mcp_servers(
                 continue
             del mcp_servers[MCP_SERVER_KEY]
         else:
-            # Preserve any existing env overrides for this server
-            if MCP_SERVER_KEY in mcp_servers:
-                for key, value in mcp_servers[MCP_SERVER_KEY].get("env", {}).items():
-                    env[key] = value
-
-            bridge = _bridge_entrypoint()
-            if copy_python_env(env) and not quiet:
-                print("[WARNING] Custom Python environment variables detected")
-
-            server_cfg = {
-                "command": ensure_local_venv(),
-                "args": [bridge],
+            mcp_servers[MCP_SERVER_KEY] = {
+                "command": _node_executable(),
+                "args": [_bridge_entrypoint()],
                 "timeout": 1800,
                 "disabled": False,
             }
-            if env:
-                server_cfg["env"] = env
-            mcp_servers[MCP_SERVER_KEY] = server_cfg
 
         # Write back
         os.makedirs(config_dir, exist_ok=True)

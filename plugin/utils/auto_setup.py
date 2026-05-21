@@ -2,8 +2,6 @@ import json
 import os
 import sys
 
-from .python_detection import copy_python_env, create_venv_with_system_python, get_python_executable
-
 
 def _repo_root() -> str:
     # plugin/utils/auto_setup.py -> plugin/utils -> plugin -> repo_root
@@ -11,41 +9,22 @@ def _repo_root() -> str:
 
 
 def _bridge_entrypoint() -> str:
-    return os.path.join(_repo_root(), "bridge", "binja_mcp_bridge.py")
+    return os.path.join(_repo_root(), "bridge", "dist", "index.js")
 
 
 def _sentinel_path() -> str:
     return os.path.join(_repo_root(), ".mcp_auto_setup_done")
 
 
-def _venv_dir() -> str:
-    return os.path.join(_repo_root(), ".venv")
+def _node_executable() -> str:
+    """Resolve absolute path to a Node.js binary.
 
-
-def _venv_python() -> str:
-    d = _venv_dir()
-    if sys.platform == "win32":
-        # Always prefer a real Python interpreter (python.exe) for MCP stdio servers.
-        # Returning binaryninja.exe here causes the MCP client to fail on Windows.
-        py = os.path.join(d, "Scripts", "python.exe")
-        return py
-    return os.path.join(d, "bin", "python3")
-
-
-def _ensure_local_venv() -> str:
-    """Create a local venv under the plugin root if missing.
-
-    Returns path to the venv's python executable; falls back to get_python_executable
-    on failure.
+    Prefers shutil.which(), falls back to the bare "node" name (lets MCP
+    client resolve via PATH). Returning "node" is acceptable because most
+    MCP clients are launched from a login shell that has Node on PATH.
     """
-    vdir = _venv_dir()
-    req = os.path.join(_repo_root(), "bridge", "requirements.txt")
-
-    try:
-        py = create_venv_with_system_python(vdir, req if os.path.exists(req) else None)
-        return py if os.path.exists(py) else get_python_executable()
-    except Exception:
-        return get_python_executable()
+    import shutil
+    return shutil.which("node") or "node"
 
 
 def _targets() -> dict:
@@ -181,11 +160,8 @@ def install_mcp_clients(quiet: bool = True) -> int:
     if not targets:
         return 0
 
-    env: dict[str, str] = {}
-    copy_python_env(env)
     bridge = _bridge_entrypoint()
-    # Prefer local venv python for bridge execution
-    command = _ensure_local_venv()
+    command = _node_executable()
 
     modified = 0
     for _name, (config_dir, config_file) in targets.items():
@@ -210,11 +186,6 @@ def install_mcp_clients(quiet: bool = True) -> int:
         if legacy_key in servers and server_key not in servers:
             try:
                 legacy_cfg = dict(servers[legacy_key])
-                # merge env
-                if env:
-                    merged_env = dict(legacy_cfg.get("env", {}))
-                    merged_env.update(env)
-                    legacy_cfg["env"] = merged_env
                 servers[server_key] = legacy_cfg
             except Exception:
                 pass
@@ -224,7 +195,6 @@ def install_mcp_clients(quiet: bool = True) -> int:
                 "args": [bridge],
                 "timeout": 1800,
                 "disabled": False,
-                **({"env": env} if env else {}),
             }
 
         try:
