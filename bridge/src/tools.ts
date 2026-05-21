@@ -28,14 +28,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "list_methods",
-    "List all function names in the program with pagination.",
+    "List all function names in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
+    async ({ view_id, offset = 0, limit = 100 }) => {
       const filename = await getActiveFilename();
-      const lines = await client.getLines("methods", { offset, limit });
+      const lines = await client.getLines("methods", { view_id, offset, limit });
       return {
         content: [{ type: "text", text: `File: ${filename}\n${lines.join("\n")}` }],
       };
@@ -44,10 +45,12 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "get_entry_points",
-    "List entry point(s) of the loaded binary.",
-    {},
-    async () => {
-      const data = await client.getJson<{ entry_points?: Array<{ address: string; name?: string }> }>("entryPoints");
+    "List entry point(s) of the loaded binary in the given view.",
+    {
+      ...viewIdField,
+    },
+    async ({ view_id }) => {
+      const data = await client.getJson<{ entry_points?: Array<{ address: string; name?: string }> }>("entryPoints", { view_id });
       if (!data || "error" in data) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
@@ -63,30 +66,32 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "search_functions_by_name",
-    "Search for functions whose name contains the given substring.",
+    "Search for functions whose name contains the given substring in the given view.",
     {
+      ...viewIdField,
       query: z.string().describe("Search query string"),
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ query, offset = 0, limit = 100 }) => {
+    async ({ view_id, query, offset = 0, limit = 100 }) => {
       if (!query) {
         return { content: [{ type: "text", text: "Error: query string is required" }] };
       }
-      const lines = await client.getLines("searchFunctions", { query, offset, limit });
+      const lines = await client.getLines("searchFunctions", { view_id, query, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "decompile_function",
-    "Decompile a specific function by name and return the decompiled C code.",
+    "Decompile a specific function by name in the given view and return the decompiled C code.",
     {
+      ...viewIdField,
       name: z.string().describe("Function name or address"),
     },
-    async ({ name }) => {
+    async ({ view_id, name }) => {
       const filename = await getActiveFilename();
-      const data = await client.getJson<{ decompiled?: string; error?: string }>("decompile", { name });
+      const data = await client.getJson<{ decompiled?: string; error?: string }>("decompile", { view_id, name });
       if (!data) {
         return { content: [{ type: "text", text: `File: ${filename}\n\nError: no response` }] };
       }
@@ -100,16 +105,17 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "decompile_to_file",
-    "Decompile a function and save the FULL HLIL pseudocode directly to a file on disk. " +
+    "Decompile a function in the given view and save the FULL HLIL pseudocode directly to a file on disk. " +
     "No LLM intermediation — the complete decompiled output is written as-is. " +
     "Also returns the pseudocode in the response for immediate analysis.",
     {
+      ...viewIdField,
       name: z.string().describe("Function name or address to decompile"),
       output_path: z.string().describe("Absolute file path to write the pseudocode (e.g. '/path/to/.omp/artifacts/pseudocode/main.txt')"),
     },
-    async ({ name, output_path }) => {
+    async ({ view_id, name, output_path }) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = await client.getJson("decompileToFile", { name, outputPath: output_path });
+      const data: any = await client.getJson("decompileToFile", { view_id, name, outputPath: output_path });
       if (!data) {
         return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
       }
@@ -127,14 +133,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "batch_decompile_to_file",
-    "Decompile ALL non-imported functions and save each to <outputDir>/<function_name>.txt. " +
+    "Decompile ALL non-imported functions in the given view and save each to <outputDir>/<function_name>.txt. " +
     "Skips external/imported functions and thunks. Returns list of saved files.",
     {
+      ...viewIdField,
       output_dir: z.string().describe("Directory to write pseudocode files to"),
     },
-    async ({ output_dir }) => {
+    async ({ view_id, output_dir }) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = await client.getJson("batchDecompileToFile", { outputDir: output_dir });
+      const data: any = await client.getJson("batchDecompileToFile", { view_id, outputDir: output_dir });
       if (!data) {
         return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
       }
@@ -152,14 +159,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "save_bndb",
-    "Save the current analysis state as a .bndb database file. " +
+    "Save the current analysis state of the given view as a .bndb database file. " +
     "The user can open this in BN GUI later to review all renames, types, and comments.",
     {
+      ...viewIdField,
       output_path: z.string().describe("Absolute path for the .bndb file (e.g. /path/to/.omp/artifacts/analysis.bndb)"),
     },
-    async ({ output_path }) => {
+    async ({ view_id, output_path }) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = await client.getJson("saveBndb", { outputPath: output_path });
+      const data: any = await client.getJson("saveBndb", { view_id, outputPath: output_path });
       if (!data) {
         return { content: [{ type: "text", text: "Error: no response from BN plugin" }] };
       }
@@ -174,16 +182,17 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "get_il",
-    "Get IL for a function in the selected view (hlil, mlil, llil).",
+    "Get IL for a function in the given view (hlil, mlil, llil).",
     {
+      ...viewIdField,
       name_or_address: z.string().describe("Function name or address (hex like 0x401000)"),
       view: z.enum(["hlil", "mlil", "llil"]).default("hlil").describe("IL view: hlil, mlil, or llil"),
       ssa: z.boolean().default(false).describe("Request SSA form (MLIL/LLIL only)"),
     },
-    async ({ name_or_address, view = "hlil", ssa = false }) => {
+    async ({ view_id, name_or_address, view = "hlil", ssa = false }) => {
       const filename = await getActiveFilename();
       const ident = name_or_address.trim();
-      const params: Record<string, string | number> = { view, ssa: ssa ? 1 : 0 };
+      const params: Record<string, string | number> = { view_id, view, ssa: ssa ? 1 : 0 };
       if (ident.toLowerCase().startsWith("0x") || /^\d+$/.test(ident)) {
         params.address = ident;
       } else {
@@ -203,13 +212,14 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "fetch_disassembly",
-    "Retrieve the disassembled code of a function as assembly mnemonic instructions.",
+    "Retrieve the disassembled code of a function in the given view as assembly mnemonic instructions.",
     {
+      ...viewIdField,
       name: z.string().describe("Function name"),
     },
-    async ({ name }) => {
+    async ({ view_id, name }) => {
       const filename = await getActiveFilename();
-      const data = await client.getJson<{ assembly?: string; error?: string }>("assembly", { name });
+      const data = await client.getJson<{ assembly?: string; error?: string }>("assembly", { view_id, name });
       if (!data) {
         return { content: [{ type: "text", text: `File: ${filename}\n\nError: no response` }] };
       }
@@ -225,27 +235,30 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "rename_function",
-    "Rename a function by its current name. The configured prefix will be automatically prepended if not present.",
+    "Rename a function by its current name in the given view. The configured prefix will be automatically prepended if not present.",
     {
+      ...viewIdField,
       old_name: z.string().describe("Current function name"),
       new_name: z.string().describe("New function name"),
     },
-    async ({ old_name, new_name }) => {
-      const result = await client.post("renameFunction", { oldName: old_name, newName: new_name });
+    async ({ view_id, old_name, new_name }) => {
+      const result = await client.post("renameFunction", { view_id, oldName: old_name, newName: new_name });
       return { content: [{ type: "text", text: result }] };
     }
   );
 
   server.tool(
     "rename_single_variable",
-    "Rename a variable in a function.",
+    "Rename a variable in a function in the given view.",
     {
+      ...viewIdField,
       function_name: z.string().describe("Function name"),
       variable_name: z.string().describe("Current variable name"),
       new_name: z.string().describe("New variable name"),
     },
-    async ({ function_name, variable_name, new_name }) => {
+    async ({ view_id, function_name, variable_name, new_name }) => {
       const data = await client.getJson<{ status?: string; error?: string }>("renameVariable", {
+        view_id,
         functionName: function_name,
         variableName: variable_name,
         newName: new_name,
@@ -265,16 +278,17 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "rename_multi_variables",
-    "Rename multiple local variables in one call.",
+    "Rename multiple local variables in one call in the given view.",
     {
+      ...viewIdField,
       function_identifier: z.string().describe("Function name or address (hex)"),
       mapping_json: z.string().optional().describe("JSON object old->new"),
       pairs: z.string().optional().describe("Comma-separated old:new pairs"),
       renames_json: z.string().optional().describe("JSON array of {old,new} objects"),
     },
-    async ({ function_identifier, mapping_json, pairs, renames_json }) => {
+    async ({ view_id, function_identifier, mapping_json, pairs, renames_json }) => {
       const ident = function_identifier.trim();
-      const params: Record<string, string> = {};
+      const params: Record<string, string> = { view_id };
       if (ident.toLowerCase().startsWith("0x") || /^\d+$/.test(ident)) {
         params.address = ident;
       } else {
@@ -316,13 +330,14 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "rename_data",
-    "Rename a data label at the specified address.",
+    "Rename a data label at the specified address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000)"),
       new_name: z.string().describe("New name for the data label"),
     },
-    async ({ address, new_name }) => {
-      const result = await client.post("renameData", { address, newName: new_name });
+    async ({ view_id, address, new_name }) => {
+      const result = await client.post("renameData", { view_id, address, newName: new_name });
       return { content: [{ type: "text", text: result }] };
     }
   );
@@ -331,74 +346,80 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "set_comment",
-    "Set a comment at a specific address.",
+    "Set a comment at a specific address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000)"),
       comment: z.string().describe("Comment text"),
     },
-    async ({ address, comment }) => {
-      const result = await client.post("comment", { address, comment });
+    async ({ view_id, address, comment }) => {
+      const result = await client.post("comment", { view_id, address, comment });
       return { content: [{ type: "text", text: result }] };
     }
   );
 
   server.tool(
     "get_comment",
-    "Get the comment at a specific address.",
+    "Get the comment at a specific address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000)"),
     },
-    async ({ address }) => {
-      const lines = await client.getLines("comment", { address });
+    async ({ view_id, address }) => {
+      const lines = await client.getLines("comment", { view_id, address });
       return { content: [{ type: "text", text: lines[0] ?? "" }] };
     }
   );
 
   server.tool(
     "delete_comment",
-    "Delete the comment at a specific address.",
+    "Delete the comment at a specific address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000)"),
     },
-    async ({ address }) => {
-      const result = await client.post("comment", { address, _method: "DELETE" });
+    async ({ view_id, address }) => {
+      const result = await client.post("comment", { view_id, address, _method: "DELETE" });
       return { content: [{ type: "text", text: result }] };
     }
   );
 
   server.tool(
     "set_function_comment",
-    "Set a comment for a function.",
+    "Set a comment for a function in the given view.",
     {
+      ...viewIdField,
       function_name: z.string().describe("Function name"),
       comment: z.string().describe("Comment text"),
     },
-    async ({ function_name, comment }) => {
-      const result = await client.post("comment/function", { name: function_name, comment });
+    async ({ view_id, function_name, comment }) => {
+      const result = await client.post("comment/function", { view_id, name: function_name, comment });
       return { content: [{ type: "text", text: result }] };
     }
   );
 
   server.tool(
     "get_function_comment",
-    "Get the comment for a function.",
+    "Get the comment for a function in the given view.",
     {
+      ...viewIdField,
       function_name: z.string().describe("Function name"),
     },
-    async ({ function_name }) => {
-      const lines = await client.getLines("comment/function", { name: function_name });
+    async ({ view_id, function_name }) => {
+      const lines = await client.getLines("comment/function", { view_id, name: function_name });
       return { content: [{ type: "text", text: lines[0] || "" }] };
     }
   );
 
   server.tool(
     "delete_function_comment",
-    "Delete the comment for a function.",
+    "Delete the comment for a function in the given view.",
     {
+      ...viewIdField,
       function_name: z.string().describe("Function name"),
     },
-    async ({ function_name }) => {
-      const result = await client.post("comment/function", { name: function_name, _method: "DELETE" });
+    async ({ view_id, function_name }) => {
+      const result = await client.post("comment/function", { view_id, name: function_name, _method: "DELETE" });
       return { content: [{ type: "text", text: result }] };
     }
   );
@@ -407,12 +428,13 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "define_types",
-    "Define types from a C code string.",
+    "Define types from a C code string in the given view.",
     {
+      ...viewIdField,
       c_code: z.string().describe("C code containing type definitions"),
     },
-    async ({ c_code }) => {
-      const data = await client.getJson<{ error?: string } | unknown[]>("defineTypes", { cCode: c_code });
+    async ({ view_id, c_code }) => {
+      const data = await client.getJson<{ error?: string } | unknown[]>("defineTypes", { view_id, cCode: c_code });
       if (!data) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
@@ -428,14 +450,16 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "list_local_types",
-    "List all local types in the database (paginated).",
+    "List all local types in the given view database (paginated).",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       count: z.number().default(200).describe("Number of results to return"),
       include_libraries: z.boolean().default(false).describe("Include library types"),
     },
-    async ({ offset = 0, count = 200, include_libraries = false }) => {
+    async ({ view_id, offset = 0, count = 200, include_libraries = false }) => {
       const lines = await client.getLines("localTypes", {
+        view_id,
         offset,
         limit: count,
         includeLibraries: include_libraries ? 1 : 0,
@@ -446,15 +470,17 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "search_types",
-    "Search local types whose name or declaration contains the substring.",
+    "Search local types in the given view whose name or declaration contains the substring.",
     {
+      ...viewIdField,
       query: z.string().describe("Search query"),
       offset: z.number().default(0).describe("Offset for pagination"),
       count: z.number().default(200).describe("Number of results to return"),
       include_libraries: z.boolean().default(false).describe("Include library types"),
     },
-    async ({ query, offset = 0, count = 200, include_libraries = false }) => {
+    async ({ view_id, query, offset = 0, count = 200, include_libraries = false }) => {
       const lines = await client.getLines("searchTypes", {
+        view_id,
         query,
         offset,
         limit: count,
@@ -466,24 +492,26 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "get_user_defined_type",
-    "Retrieve definition of a user defined type (struct, enumeration, typedef, union).",
+    "Retrieve definition of a user defined type (struct, enumeration, typedef, union) in the given view.",
     {
+      ...viewIdField,
       type_name: z.string().describe("Type name"),
     },
-    async ({ type_name }) => {
-      const lines = await client.getLines("getUserDefinedType", { name: type_name });
+    async ({ view_id, type_name }) => {
+      const lines = await client.getLines("getUserDefinedType", { view_id, name: type_name });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_type_info",
-    "Resolve a type name and return its declaration and details (kind, members, enum values).",
+    "Resolve a type name in the given view and return its declaration and details (kind, members, enum values).",
     {
+      ...viewIdField,
       type_name: z.string().describe("Type name"),
     },
-    async ({ type_name }) => {
-      const data = await client.getJson<Record<string, unknown>>("getTypeInfo", { name: type_name });
+    async ({ view_id, type_name }) => {
+      const data = await client.getJson<Record<string, unknown>>("getTypeInfo", { view_id, name: type_name });
       if (!data) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
@@ -496,12 +524,13 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "declare_c_type",
-    "Create or update a local type from a C declaration.",
+    "Create or update a local type from a C declaration in the given view.",
     {
+      ...viewIdField,
       c_declaration: z.string().describe("C type declaration"),
     },
-    async ({ c_declaration }) => {
-      const data = await client.getJson<{ error?: string; defined_types?: Record<string, unknown>; count?: number }>("declareCType", { declaration: c_declaration });
+    async ({ view_id, c_declaration }) => {
+      const data = await client.getJson<{ error?: string; defined_types?: Record<string, unknown>; count?: number }>("declareCType", { view_id, declaration: c_declaration });
       if (!data) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
@@ -519,14 +548,16 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "retype_variable",
-    "Retype a variable in a function.",
+    "Retype a variable in a function in the given view.",
     {
+      ...viewIdField,
       function_name: z.string().describe("Function name"),
       variable_name: z.string().describe("Variable name"),
       type_str: z.string().describe("New type for the variable"),
     },
-    async ({ function_name, variable_name, type_str }) => {
+    async ({ view_id, function_name, variable_name, type_str }) => {
       const data = await client.getJson<{ status?: string; error?: string }>("retypeVariable", {
+        view_id,
         functionName: function_name,
         variableName: variable_name,
         type: type_str,
@@ -546,14 +577,16 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "set_local_variable_type",
-    "Set a local variable's type.",
+    "Set a local variable's type in the given view.",
     {
+      ...viewIdField,
       function_address: z.string().describe("Function address or name"),
       variable_name: z.string().describe("Variable name"),
       new_type: z.string().describe("New type"),
     },
-    async ({ function_address, variable_name, new_type }) => {
+    async ({ view_id, function_address, variable_name, new_type }) => {
       const data = await client.getJson<{ status?: string; error?: string }>("setLocalVariableType", {
+        view_id,
         functionAddress: function_address,
         variableName: variable_name,
         newType: new_type,
@@ -576,26 +609,28 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "list_data_items",
-    "List defined data labels and their values with pagination.",
+    "List defined data labels and their values in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const lines = await client.getLines("data", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const lines = await client.getLines("data", { view_id, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "hexdump_address",
-    "Hexdump data starting at an address.",
+    "Hexdump data starting at an address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000)"),
       length: z.number().default(-1).describe("Number of bytes (use -1 for defined size)"),
     },
-    async ({ address, length = -1 }) => {
-      const params: Record<string, string | number> = { address };
+    async ({ view_id, address, length = -1 }) => {
+      const params: Record<string, string | number> = { view_id, address };
       if (length !== undefined && length !== -1) {
         params.length = length;
       }
@@ -606,22 +641,23 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "hexdump_data",
-    "Hexdump a data symbol by name or address.",
+    "Hexdump a data symbol by name or address in the given view.",
     {
+      ...viewIdField,
       name_or_address: z.string().describe("Symbol name or address (hex)"),
       length: z.number().default(-1).describe("Number of bytes (use -1 for defined size)"),
     },
-    async ({ name_or_address, length = -1 }) => {
+    async ({ view_id, name_or_address, length = -1 }) => {
       const ident = name_or_address.trim();
       if (ident.startsWith("0x")) {
-        const params: Record<string, string | number> = { address: ident };
+        const params: Record<string, string | number> = { view_id, address: ident };
         if (length !== undefined && length !== -1) {
           params.length = length;
         }
         const text = await client.getText("hexdump", params);
         return { content: [{ type: "text", text }] };
       }
-      const params: Record<string, string | number> = { name: ident };
+      const params: Record<string, string | number> = { view_id, name: ident };
       if (length !== undefined && length !== -1) {
         params.length = length;
       }
@@ -632,16 +668,17 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "get_data_decl",
-    "Return a declaration-like string and hexdump for a data symbol.",
+    "Return a declaration-like string and hexdump for a data symbol in the given view.",
     {
+      ...viewIdField,
       name_or_address: z.string().describe("Symbol name or address (hex)"),
       length: z.number().default(-1).describe("Number of bytes"),
     },
-    async ({ name_or_address, length = -1 }) => {
+    async ({ view_id, name_or_address, length = -1 }) => {
       const ident = name_or_address.trim();
       const params: Record<string, string | number> = ident.startsWith("0x")
-        ? { address: ident }
-        : { name: ident };
+        ? { view_id, address: ident }
+        : { view_id, name: ident };
       if (length !== undefined && length !== -1) {
         params.length = length;
       }
@@ -672,73 +709,79 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "get_xrefs_to",
-    "Get all cross references (code and data) to the given address.",
+    "Get all cross references (code and data) to the given address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex or decimal)"),
     },
-    async ({ address }) => {
-      const lines = await client.getLines("getXrefsTo", { address });
+    async ({ view_id, address }) => {
+      const lines = await client.getLines("getXrefsTo", { view_id, address });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_xrefs_to_field",
-    "Get all cross references to a named struct field (member).",
+    "Get all cross references to a named struct field (member) in the given view.",
     {
+      ...viewIdField,
       struct_name: z.string().describe("Struct name"),
       field_name: z.string().describe("Field name"),
     },
-    async ({ struct_name, field_name }) => {
-      const lines = await client.getLines("getXrefsToField", { struct: struct_name, field: field_name });
+    async ({ view_id, struct_name, field_name }) => {
+      const lines = await client.getLines("getXrefsToField", { view_id, struct: struct_name, field: field_name });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_xrefs_to_struct",
-    "Get cross references/usages related to a struct name.",
+    "Get cross references/usages related to a struct name in the given view.",
     {
+      ...viewIdField,
       struct_name: z.string().describe("Struct name"),
     },
-    async ({ struct_name }) => {
-      const lines = await client.getLines("getXrefsToStruct", { name: struct_name });
+    async ({ view_id, struct_name }) => {
+      const lines = await client.getLines("getXrefsToStruct", { view_id, name: struct_name });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_xrefs_to_type",
-    "Get xrefs/usages related to a struct or type name.",
+    "Get xrefs/usages related to a struct or type name in the given view.",
     {
+      ...viewIdField,
       type_name: z.string().describe("Type name"),
     },
-    async ({ type_name }) => {
-      const lines = await client.getLines("getXrefsToType", { name: type_name });
+    async ({ view_id, type_name }) => {
+      const lines = await client.getLines("getXrefsToType", { view_id, name: type_name });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_xrefs_to_enum",
-    "Get usages/xrefs of an enum by scanning for member values and matches.",
+    "Get usages/xrefs of an enum by scanning for member values and matches in the given view.",
     {
+      ...viewIdField,
       enum_name: z.string().describe("Enum name"),
     },
-    async ({ enum_name }) => {
-      const lines = await client.getLines("getXrefsToEnum", { name: enum_name });
+    async ({ view_id, enum_name }) => {
+      const lines = await client.getLines("getXrefsToEnum", { view_id, name: enum_name });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_xrefs_to_union",
-    "Get cross references/usages related to a union type by name.",
+    "Get cross references/usages related to a union type by name in the given view.",
     {
+      ...viewIdField,
       union_name: z.string().describe("Union name"),
     },
-    async ({ union_name }) => {
-      const lines = await client.getLines("getXrefsToUnion", { name: union_name });
+    async ({ view_id, union_name }) => {
+      const lines = await client.getLines("getXrefsToUnion", { view_id, name: union_name });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
@@ -747,51 +790,55 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "get_callers",
-    "Get functions that call the specified function(s). Returns caller names, addresses, and call sites.",
+    "Get functions that call the specified function(s) in the given view. Returns caller names, addresses, and call sites.",
     {
+      ...viewIdField,
       identifier: z.string().describe("Function name or address (or comma-separated list)"),
     },
-    async ({ identifier }) => {
-      const lines = await client.getLines("getCallers", { identifier });
+    async ({ view_id, identifier }) => {
+      const lines = await client.getLines("getCallers", { view_id, identifier });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_callees",
-    "Get functions called by the specified function(s). Returns callee names, addresses, and call sites.",
+    "Get functions called by the specified function(s) in the given view. Returns callee names, addresses, and call sites.",
     {
+      ...viewIdField,
       identifier: z.string().describe("Function name or address (or comma-separated list)"),
     },
-    async ({ identifier }) => {
-      const lines = await client.getLines("getCallees", { identifier });
+    async ({ view_id, identifier }) => {
+      const lines = await client.getLines("getCallees", { view_id, identifier });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "function_at",
-    "Retrieve the name of the function the address belongs to.",
+    "Retrieve the name of the function the address belongs to in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex format 0x00001)"),
     },
-    async ({ address }) => {
-      const lines = await client.getLines("functionAt", { address });
+    async ({ view_id, address }) => {
+      const lines = await client.getLines("functionAt", { view_id, address });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "get_stack_frame_vars",
-    "Get stack frame variable information for a function (names, offsets, sizes, types).",
+    "Get stack frame variable information for a function in the given view (names, offsets, sizes, types).",
     {
+      ...viewIdField,
       function_identifier: z.string().describe("Function name or address (hex)"),
     },
-    async ({ function_identifier }) => {
+    async ({ view_id, function_identifier }) => {
       const ident = function_identifier.trim();
       const params: Record<string, string> = ident.toLowerCase().startsWith("0x") || /^\d+$/.test(ident)
-        ? { address: ident }
-        : { name: ident };
+        ? { view_id, address: ident }
+        : { view_id, name: ident };
       const data = await client.getJson<{ error?: string; stack_frame_vars?: string[] }>("getStackFrameVars", params);
       if (!data) {
         return { content: [{ type: "text", text: "" }] };
@@ -806,52 +853,56 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "list_classes",
-    "List all namespace/class names in the program with pagination.",
+    "List all namespace/class names in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const lines = await client.getLines("classes", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const lines = await client.getLines("classes", { view_id, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_namespaces",
-    "List all non-global namespaces in the program with pagination.",
+    "List all non-global namespaces in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const lines = await client.getLines("namespaces", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const lines = await client.getLines("namespaces", { view_id, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_segments",
-    "List all memory segments in the program with pagination.",
+    "List all memory segments in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const lines = await client.getLines("segments", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const lines = await client.getLines("segments", { view_id, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_sections",
-    "List sections in the program with pagination.",
+    "List sections in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const data = await client.getJson<{ error?: string; sections?: Array<Record<string, unknown>> }>("sections", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const data = await client.getJson<{ error?: string; sections?: Array<Record<string, unknown>> }>("sections", { view_id, offset, limit });
       if (!data || "error" in data) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
@@ -873,68 +924,73 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "list_imports",
-    "List imported symbols in the program with pagination.",
+    "List imported symbols in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const lines = await client.getLines("imports", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const lines = await client.getLines("imports", { view_id, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_exports",
-    "List exported functions/symbols with pagination.",
+    "List exported functions/symbols in the given view with pagination.",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       limit: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, limit = 100 }) => {
-      const lines = await client.getLines("exports", { offset, limit });
+    async ({ view_id, offset = 0, limit = 100 }) => {
+      const lines = await client.getLines("exports", { view_id, offset, limit });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_strings",
-    "List all strings in the database (paginated).",
+    "List all strings in the given view database (paginated).",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       count: z.number().default(100).describe("Number of results to return"),
     },
-    async ({ offset = 0, count = 100 }) => {
-      const lines = await client.getLines("strings", { offset, limit: count });
+    async ({ view_id, offset = 0, count = 100 }) => {
+      const lines = await client.getLines("strings", { view_id, offset, limit: count });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_strings_filter",
-    "List matching strings in the database (paginated, filtered).",
+    "List matching strings in the given view database (paginated, filtered).",
     {
+      ...viewIdField,
       offset: z.number().default(0).describe("Offset for pagination"),
       count: z.number().default(100).describe("Number of results to return"),
       filter: z.string().optional().describe("Filter string"),
     },
-    async ({ offset = 0, count = 100, filter = "" }) => {
-      const lines = await client.getLines("strings/filter", { offset, limit: count, filter });
+    async ({ view_id, offset = 0, count = 100, filter = "" }) => {
+      const lines = await client.getLines("strings/filter", { view_id, offset, limit: count, filter });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );
 
   server.tool(
     "list_all_strings",
-    "List all strings in the database (aggregated across pages).",
+    "List all strings in the given view database (aggregated across pages).",
     {
+      ...viewIdField,
       batch_size: z.number().default(500).describe("Batch size for aggregation"),
     },
-    async ({ batch_size = 500 }) => {
+    async ({ view_id, batch_size = 500 }) => {
       const results: string[] = [];
       let offset = 0;
       while (true) {
-        const data = await client.getJson<Record<string, unknown>>("strings", { offset, limit: batch_size });
+        const data = await client.getJson<Record<string, unknown>>("strings", { view_id, offset, limit: batch_size });
         if (!data || !("strings" in data)) {
           break;
         }
@@ -1100,14 +1156,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "set_function_prototype",
-    "Set a function's prototype by name or address.",
+    "Set a function's prototype by name or address in the given view.",
     {
+      ...viewIdField,
       name_or_address: z.string().describe("Function name or address"),
       prototype: z.string().describe("New function prototype"),
     },
-    async ({ name_or_address, prototype }) => {
+    async ({ view_id, name_or_address, prototype }) => {
       const ident = name_or_address.trim();
-      const params: Record<string, string> = { prototype };
+      const params: Record<string, string> = { view_id, prototype };
       if (ident.toLowerCase().startsWith("0x") || /^\d+$/.test(ident)) {
         params.address = ident;
       } else {
@@ -1129,13 +1186,14 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "make_function_at",
-    "Create a function at the given address.",
+    "Create a function at the given address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000 or decimal)"),
       platform: z.string().optional().describe("Platform (e.g., linux-x86_64)"),
     },
-    async ({ address, platform }) => {
-      const params: Record<string, string> = { address };
+    async ({ view_id, address, platform }) => {
+      const params: Record<string, string> = { view_id, address };
       if (platform) {
         params.platform = platform;
       }
@@ -1178,13 +1236,14 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "patch_bytes",
-    "Patch bytes at a given address in the binary.",
+    "Patch bytes at a given address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000 or decimal)"),
       data: z.string().describe("Hex string of bytes to write (e.g., '90 90' or '9090')"),
       save_to_file: z.boolean().default(true).describe("Save patched binary to disk"),
     },
-    async ({ address, data, save_to_file = true }) => {
+    async ({ view_id, address, data, save_to_file = true }) => {
       const result = await client.getJson<{
         error?: string;
         status?: string;
@@ -1195,7 +1254,7 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
         saved_to_file?: boolean;
         saved_path?: string;
         warning?: string;
-      }>("patch", { address, data, save_to_file: save_to_file ? 1 : 0 });
+      }>("patch", { view_id, address, data, save_to_file: save_to_file ? 1 : 0 });
       if (!result) {
         return { content: [{ type: "text", text: "Error: no response" }] };
       }
@@ -1236,14 +1295,15 @@ export function registerTools(server: McpServer, client: BinjaHttpClient): void 
 
   server.tool(
     "format_value",
-    "Convert and annotate a value at an address in Binary Ninja.",
+    "Convert and annotate a value at an address in the given view.",
     {
+      ...viewIdField,
       address: z.string().describe("Address (hex like 0x401000)"),
       text: z.string().describe("Text to convert"),
       size: z.number().default(0).describe("Size in bytes"),
     },
-    async ({ address, text, size = 0 }) => {
-      const lines = await client.getLines("formatValue", { address, text, size });
+    async ({ view_id, address, text, size = 0 }) => {
+      const lines = await client.getLines("formatValue", { view_id, address, text, size });
       return { content: [{ type: "text", text: lines.join("\n") }] };
     }
   );

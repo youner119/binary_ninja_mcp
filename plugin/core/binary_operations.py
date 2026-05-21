@@ -28,10 +28,15 @@ class AnalysisNotReady(BaseException):
         super().__init__(progress.get("hint", "Analysis still running"))
 
 
-class ViewNotFound(Exception):
+class ViewNotFound(BaseException):
     """Raised when view_id does not match any registered BinaryView.
 
-    HTTP handler converts this to a 404 response.
+    Inherits from BaseException (not Exception) so it bypasses the routine
+    ``except Exception`` blocks scattered across 60+ route handlers and
+    reaches the HTTP layer's top-level catch, which converts it to a 404.
+    Originally spec'd as Exception, changed during Phase 2 gate verification
+    once it became clear inner except-Exception clauses were swallowing it
+    and producing misleading 500s.
     """
 
     def __init__(self, view_id: str):
@@ -296,6 +301,25 @@ class BinaryOperations:
             self._views_by_id.pop(view_id, None)
             raise ViewNotFound(view_id)
         return bv
+
+    def _resolve_or_current(self, view_id: str | None) -> bn.BinaryView:
+        """Pick the BinaryView a method should operate on.
+
+        Phase 2 transitional helper:
+            - view_id explicit → resolve_view (multi-session path).
+            - view_id None     → fall back to _current_view (legacy single-view
+              path). Phase 3 removes the fallback and makes view_id mandatory.
+
+        Raises:
+            ValueError: view_id is an empty string.
+            ViewNotFound: view_id is non-empty but not registered.
+            RuntimeError: view_id is None and no _current_view either.
+        """
+        if view_id is not None:
+            return self.resolve_view(view_id)
+        if self._current_view is None:
+            raise RuntimeError("No binary loaded")
+        return self._current_view
 
     def _view_info(self, bv: bn.BinaryView, view_id: str, *, summary: bool = False) -> dict:
         """Build the response schema for create_view / list_view.
@@ -588,17 +612,17 @@ class BinaryOperations:
                 break
         return {"id": vid or "", "filename": getattr(vb.file, "filename", "(unknown)")}
 
-    def get_function_by_name_or_address(self, identifier: str | int) -> bn.Function | None:
+    def get_function_by_name_or_address(self, identifier: str | int, *, view_id: str | None = None) -> bn.Function | None:
         """Get a function by either its name or address.
 
         Args:
             identifier: Function name or address (can be int, hex string, or decimal string)
+            view_id: Optional view id for multi-session dispatch.
 
         Returns:
             Function object if found, None otherwise
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         # Handle address-based lookup
         try:
@@ -607,7 +631,7 @@ class BinaryOperations:
             elif isinstance(identifier, (int, str)):
                 addr = int(identifier) if isinstance(identifier, str) else identifier
 
-            func = self._current_view.get_function_at(addr)
+            func = bv.get_function_at(addr)
             if func:
                 bn.log_info(f"Found function at address {hex(addr)}: {func.name}")
                 return func
@@ -615,21 +639,21 @@ class BinaryOperations:
             pass
 
         # Handle name-based lookup with case sensitivity
-        for func in self._current_view.functions:
+        for func in bv.functions:
             if func.name == identifier:
                 bn.log_info(f"Found function by name: {func.name}")
                 return func
 
         # Try case-insensitive match as fallback
-        for func in self._current_view.functions:
+        for func in bv.functions:
             if func.name.lower() == str(identifier).lower():
                 bn.log_info(f"Found function by case-insensitive name: {func.name}")
                 return func
 
         # Try symbol table lookup as last resort
-        symbol = self._current_view.get_symbol_by_raw_name(str(identifier))
+        symbol = bv.get_symbol_by_raw_name(str(identifier))
         if symbol and symbol.address:
-            func = self._current_view.get_function_at(symbol.address)
+            func = bv.get_function_at(symbol.address)
             if func:
                 bn.log_info(f"Found function through symbol lookup: {func.name}")
                 return func
@@ -775,11 +799,10 @@ class BinaryOperations:
                 continue
         return entries
 
-    def get_callers(self, identifiers: Any) -> dict[str, Any]:
+    def get_callers(self, identifiers: Any, *, view_id: str | None = None) -> dict[str, Any]:
         """Collect caller information for the given function identifiers."""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
-        self.ensure_analysis_ready()
+        bv = self._resolve_or_current(view_id)
+        self.ensure_analysis_ready(bv)
 
         items = self._normalize_identifier_list(identifiers)
         if not items:
@@ -789,7 +812,7 @@ class BinaryOperations:
         errors: list[str] = []
         for ident in items:
             try:
-                func = self.get_function_by_name_or_address(ident)
+                func = self.get_function_by_name_or_address(ident, view_id=view_id)
             except Exception as exc:
                 func = None
                 errors.append(f"{ident}: {exc}")
@@ -806,11 +829,10 @@ class BinaryOperations:
 
         return {"results": results, "errors": errors}
 
-    def get_callees(self, identifiers: Any) -> dict[str, Any]:
+    def get_callees(self, identifiers: Any, *, view_id: str | None = None) -> dict[str, Any]:
         """Collect callee information for the given function identifiers."""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
-        self.ensure_analysis_ready()
+        bv = self._resolve_or_current(view_id)
+        self.ensure_analysis_ready(bv)
 
         items = self._normalize_identifier_list(identifiers)
         if not items:
@@ -820,7 +842,7 @@ class BinaryOperations:
         errors: list[str] = []
         for ident in items:
             try:
-                func = self.get_function_by_name_or_address(ident)
+                func = self.get_function_by_name_or_address(ident, view_id=view_id)
             except Exception as exc:
                 func = None
                 errors.append(f"{ident}: {exc}")
@@ -837,13 +859,12 @@ class BinaryOperations:
 
         return {"results": results, "errors": errors}
 
-    def get_function_names(self, offset: int = 0, limit: int = 100) -> list[dict[str, str]]:
+    def get_function_names(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, str]]:
         """Get list of function names with addresses"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         functions = []
-        for func in self._current_view.functions:
+        for func in bv.functions:
             functions.append(
                 {
                     "name": func.name,
@@ -854,16 +875,15 @@ class BinaryOperations:
 
         return functions[offset : offset + limit]
 
-    def get_class_names(self, offset: int = 0, limit: int = 100) -> list[str]:
+    def get_class_names(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[str]:
         """Get list of class names with pagination"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         class_names = set()
 
         try:
             # Try different methods to identify classes
-            for type_obj in self._current_view.types.values():
+            for type_obj in bv.types.values():
                 try:
                     # Skip None or invalid types
                     if not type_obj or not hasattr(type_obj, "name"):
@@ -912,13 +932,12 @@ class BinaryOperations:
             bn.log_error(f"Error getting class names: {e}")
             return []
 
-    def get_segments(self, offset: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    def get_segments(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, Any]]:
         """Get list of segments with pagination"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         segments = []
-        for segment in self._current_view.segments:
+        for segment in bv.segments:
             segment_info = {
                 "start": hex(segment.start),
                 "end": hex(segment.end),
@@ -954,7 +973,7 @@ class BinaryOperations:
 
         return segments[offset : offset + limit]
 
-    def get_sections(self, offset: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    def get_sections(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, Any]]:
         """Get list of sections with pagination.
 
         Returns per-section fields when available:
@@ -966,15 +985,14 @@ class BinaryOperations:
         - linked_section: related/paired section name if exposed
         - alignment: alignment in bytes if exposed
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         results: list[dict[str, Any]] = []
 
         # Binary Ninja has exposed sections across versions either as an
         # iterable of Section objects or a dict-like object. Handle both.
         try:
-            sec_container = getattr(self._current_view, "sections", None)
+            sec_container = getattr(bv, "sections", None)
         except Exception:
             sec_container = None
         if not sec_container:
@@ -1040,7 +1058,7 @@ class BinaryOperations:
 
         return results[offset : offset + limit]
 
-    def rename_function(self, old_name: str, new_name: str) -> bool:
+    def rename_function(self, old_name: str, new_name: str, *, view_id: str | None = None) -> bool:
         """Rename a function using multiple fallback methods.
 
         Args:
@@ -1050,11 +1068,10 @@ class BinaryOperations:
         Returns:
             True if rename succeeded, False otherwise
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            func = self.get_function_by_name_or_address(old_name)
+            func = self.get_function_by_name_or_address(old_name, view_id=view_id)
             if not func:
                 bn.log_error(f"Function not found: {old_name}")
                 return False
@@ -1089,18 +1106,18 @@ class BinaryOperations:
                             if hasattr(func.symbol, "namespace")
                             else None,
                         )
-                        self._current_view.define_user_symbol(new_symbol)
+                        bv.define_user_symbol(new_symbol)
                         bn.log_info("Successfully renamed function using symbol table")
                         return True
                     except Exception as e:
                         bn.log_error(f"Symbol-based rename failed: {e}")
 
                 # Try function update method as last resort
-                if hasattr(self._current_view, "update_function"):
+                if hasattr(bv, "update_function"):
                     try:
                         func_copy = func
                         func_copy.name = new_name
-                        self._current_view.update_function(func)
+                        bv.update_function(func)
                         bn.log_info("Successfully renamed function using update method")
                         return True
                     except Exception as e:
@@ -1117,12 +1134,11 @@ class BinaryOperations:
             bn.log_error(f"Error in rename_function: {e}")
             return False
 
-    def get_function_info(self, identifier: str | int) -> dict[str, Any] | None:
+    def get_function_info(self, identifier: str | int, *, view_id: str | None = None) -> dict[str, Any] | None:
         """Get detailed information about a function"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)  # noqa: F841 — validates view exists
 
-        func = self.get_function_by_name_or_address(identifier)
+        func = self.get_function_by_name_or_address(identifier, view_id=view_id)
         if not func:
             return None
 
@@ -1204,7 +1220,7 @@ class BinaryOperations:
         except Exception:
             return None
 
-    def decompile_function(self, identifier: str | int, lang: str = "hlil") -> str | None:
+    def decompile_function(self, identifier: str | int, lang: str = "hlil", *, view_id: str | None = None) -> str | None:
         """Decompile a function with selectable language representation.
 
         Args:
@@ -1216,16 +1232,15 @@ class BinaryOperations:
         Returns:
             Formatted code with address prefixes per line
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
-        func = self.get_function_by_name_or_address(identifier)
+        func = self.get_function_by_name_or_address(identifier, view_id=view_id)
         if not func:
             return None
 
         # analyze func in case it was skipped
         func.analysis_skipped = False
-        self.ensure_analysis_ready()
+        self.ensure_analysis_ready(bv)
 
         if lang == "pseudoc":
             result = self._render_pseudo_c(func)
@@ -1246,7 +1261,7 @@ class BinaryOperations:
             return None
 
     def get_function_il(
-        self, identifier: str | int, view: str = "hlil", ssa: bool = False
+        self, identifier: str | int, view: str = "hlil", ssa: bool = False, *, view_id: str | None = None
     ) -> str | None:
         """Return IL for a function with selectable view and optional SSA form.
 
@@ -1258,17 +1273,16 @@ class BinaryOperations:
         Returns:
             Concatenated string with one instruction per line prefixed by address.
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
-        func = self.get_function_by_name_or_address(identifier)
+        func = self.get_function_by_name_or_address(identifier, view_id=view_id)
         if not func:
             return None
 
         # Ensure analysis has run for this function
         try:
             func.analysis_skipped = False
-            self.ensure_analysis_ready()
+            self.ensure_analysis_ready(bv)
         except Exception:
             pass
 
@@ -1314,14 +1328,13 @@ class BinaryOperations:
             )
             return None
 
-    def rename_data(self, address: int, new_name: str) -> bool:
+    def rename_data(self, address: int, new_name: str, *, view_id: str | None = None) -> bool:
         """Rename data at a specific address"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            if self._current_view.is_valid_offset(address):
-                self._current_view.define_user_symbol(
+            if bv.is_valid_offset(address):
+                bv.define_user_symbol(
                     bn.Symbol(bn.SymbolType.DataSymbol, address, new_name)
                 )
                 return True
@@ -1330,7 +1343,7 @@ class BinaryOperations:
         return False
 
     def make_function_at(
-        self, address: str | int, architecture: str | None = None
+        self, address: str | int, architecture: str | None = None, *, view_id: str | None = None
     ) -> dict[str, Any]:
         """Create a function at the given address (no-op if it already exists).
 
@@ -1345,8 +1358,7 @@ class BinaryOperations:
             RuntimeError if no binary is loaded.
             ValueError on invalid address or creation failure.
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         # Parse address
         try:
@@ -1356,8 +1368,6 @@ class BinaryOperations:
                 addr = int(address)
         except Exception:
             raise ValueError(f"Invalid address: {address}")
-
-        bv = self._current_view
 
         # If a function already exists, return info
         try:
@@ -1553,7 +1563,7 @@ class BinaryOperations:
         }
 
     def get_defined_data(
-        self, offset: int = 0, limit: int = 100, read_len: int = 32
+        self, offset: int = 0, limit: int = 100, read_len: int = 32, *, view_id: str | None = None
     ) -> list[dict[str, Any]]:
         """Get list of defined data variables with lightweight previews and sizes.
 
@@ -1568,11 +1578,10 @@ class BinaryOperations:
         - ascii_preview: printable ASCII representation for the same bytes
         - repr: concise, human-friendly summary for LLMs (value/ASCII/hex)
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         data_items = []
-        for var in self._current_view.data_vars:
+        for var in bv.data_vars:
             data_type = None  # may be a BN Type or a DataVariable
             value = None
             width = None
@@ -1583,9 +1592,9 @@ class BinaryOperations:
             try:
                 # Prefer DataVariable (carries underlying Type)
                 dv = None
-                if hasattr(self._current_view, "get_data_var_at"):
+                if hasattr(bv, "get_data_var_at"):
                     try:
-                        dv = self._current_view.get_data_var_at(var)
+                        dv = bv.get_data_var_at(var)
                     except Exception:
                         dv = None
                 if dv is not None and hasattr(dv, "type") and dv.type is not None:
@@ -1593,9 +1602,9 @@ class BinaryOperations:
                     data_type = dv  # keep for fallback string formatting
                 else:
                     # Fall back to direct type lookup
-                    if hasattr(self._current_view, "get_type_at"):
+                    if hasattr(bv, "get_type_at"):
                         try:
-                            typ_obj = self._current_view.get_type_at(var)
+                            typ_obj = bv.get_type_at(var)
                             data_type = typ_obj
                         except Exception:
                             typ_obj = None
@@ -1610,7 +1619,7 @@ class BinaryOperations:
                 # Best-effort numeric read for small integers (<= 8 bytes)
                 if width is not None and width <= 8:
                     try:
-                        value = str(self._current_view.read_int(var, width))
+                        value = str(bv.read_int(var, width))
                     except (ValueError, RuntimeError):
                         value = None
 
@@ -1629,7 +1638,7 @@ class BinaryOperations:
                     eff_len = min(eff_len, int(width))
 
                 try:
-                    raw = self._current_view.read(var, eff_len)
+                    raw = bv.read(var, eff_len)
                     if raw is not None:
                         try:
                             bytes_hex = raw.hex()
@@ -1649,14 +1658,14 @@ class BinaryOperations:
             # If BN doesn't expose a width, try to infer size from call sites
             if width is None:
                 try:
-                    inferred = self.infer_data_size(int(var))
+                    inferred = self.infer_data_size(int(var), view_id=view_id)
                     if isinstance(inferred, int) and inferred > 0:
                         width = inferred
                 except Exception:
                     pass
 
             # Get symbol information
-            sym = self._current_view.get_symbol_at(var)
+            sym = bv.get_symbol_at(var)
             # Choose a concise repr for LLMs
             if value is not None:
                 short_repr = f"int:{value}"
@@ -1690,7 +1699,7 @@ class BinaryOperations:
 
         return data_items[offset : offset + limit]
 
-    def infer_data_size(self, address: int) -> int | None:
+    def infer_data_size(self, address: int, *, view_id: str | None = None) -> int | None:
         """Infer size for data at address when BN hasn't defined a type width.
 
         Strategy:
@@ -1699,19 +1708,21 @@ class BinaryOperations:
           an argument equals this address and extract the last numeric argument
           as a best-effort length. Returns the maximum constant seen.
         """
-        if not self._current_view:
+        try:
+            bv = self._resolve_or_current(view_id)
+        except (RuntimeError, Exception):
             return None
 
         # 1) BN-provided width if available
         try:
             dv = None
-            if hasattr(self._current_view, "get_data_var_at"):
-                dv = self._current_view.get_data_var_at(address)
+            if hasattr(bv, "get_data_var_at"):
+                dv = bv.get_data_var_at(address)
             t = None
             if dv is not None and hasattr(dv, "type"):
                 t = dv.type
-            elif hasattr(self._current_view, "get_type_at"):
-                t = self._current_view.get_type_at(address)
+            elif hasattr(bv, "get_type_at"):
+                t = bv.get_type_at(address)
             if t is not None and hasattr(t, "width") and t.width:
                 return int(t.width)
         except Exception:
@@ -1722,7 +1733,7 @@ class BinaryOperations:
             addr_hex = hex(address)
             candidates: list[int] = []
             names = ("memcmp", "strncmp", "memcpy", "strncpy")
-            for func in list(self._current_view.functions):
+            for func in list(bv.functions):
                 try:
                     il = getattr(func, "hlil", None)
                     if not il:
@@ -1760,7 +1771,7 @@ class BinaryOperations:
         return None
 
     def list_local_types(
-        self, offset: int = 0, limit: int = 100, include_libraries: bool = False
+        self, offset: int = 0, limit: int = 100, include_libraries: bool = False, *, view_id: str | None = None
     ) -> list[dict[str, Any]]:
         """List local types (Types view) in the current database.
 
@@ -1769,8 +1780,7 @@ class BinaryOperations:
         - kind: struct/union/class/enum/typedef/unknown
         - decl: string form of the type (when available)
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         results: list[dict[str, Any]] = []
         seen_keys = set()
@@ -1787,15 +1797,15 @@ class BinaryOperations:
                 # Fallback: try to resolve missing type object by querying BV / libraries
                 if tobj is None:
                     try:
-                        if hasattr(self._current_view, "get_type_by_name"):
-                            t2 = self._current_view.get_type_by_name(name_str)
+                        if hasattr(bv, "get_type_by_name"):
+                            t2 = bv.get_type_by_name(name_str)
                             if t2 is not None:
                                 tobj = t2
                     except Exception:
                         pass
                     if tobj is None:
                         try:
-                            plat = getattr(self._current_view, "platform", None)
+                            plat = getattr(bv, "platform", None)
                             libs = list(getattr(plat, "type_libraries", []) or []) if plat else []
                             for lib in libs:
                                 get_t = getattr(lib, "get_type_by_name", None)
@@ -1888,7 +1898,7 @@ class BinaryOperations:
 
             # Source 1: user_type_container (explicit local/user types)
             try:
-                utc = getattr(self._current_view, "user_type_container", None)
+                utc = getattr(bv, "user_type_container", None)
                 if utc and getattr(utc, "types", None):
                     for type_id in list(utc.types.keys()):
                         try:
@@ -1910,7 +1920,7 @@ class BinaryOperations:
                 pass
 
             # Source 2: view.types (BN view-local types)
-            for k, v in self._current_view.types.items():
+            for k, v in bv.types.items():
                 try:
                     if isinstance(v, (tuple, list)) and len(v) >= 2:
                         name = str(v[0])
@@ -1927,7 +1937,7 @@ class BinaryOperations:
             # Source 3: platform type libraries (optional; can be heavy)
             if include_libraries:
                 try:
-                    plat = getattr(self._current_view, "platform", None)
+                    plat = getattr(bv, "platform", None)
                     libs = []
                     try:
                         libs = list(getattr(plat, "type_libraries", []) or [])
@@ -1976,19 +1986,18 @@ class BinaryOperations:
         return results[offset : offset + limit]
 
     def search_local_types(
-        self, query: str, offset: int = 0, limit: int = 100, include_libraries: bool = False
+        self, query: str, offset: int = 0, limit: int = 100, include_libraries: bool = False, *, view_id: str | None = None
     ) -> list[dict[str, Any]]:
         """Search local/view types whose name or declaration contains the substring.
 
         Returns entries with {name, kind, type_class, decl}.
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        self._resolve_or_current(view_id)  # validates view exists
         if not query:
             return []
         ql = str(query).lower()
         # Only local types by default (fast). Optionally include libraries.
-        all_types = self.list_local_types(0, 1_000_000, include_libraries=include_libraries)
+        all_types = self.list_local_types(0, 1_000_000, include_libraries=include_libraries, view_id=view_id)
         matches: list[dict[str, Any]] = []
         for t in all_types:
             try:
@@ -2002,7 +2011,7 @@ class BinaryOperations:
             return matches[offset:]
         return matches[offset : offset + limit]
 
-    def get_type_info(self, name: str) -> dict[str, Any]:
+    def get_type_info(self, name: str, *, view_id: str | None = None) -> dict[str, Any]:
         """Resolve a type by name and return detailed information.
 
         Returns a dictionary with:
@@ -2014,8 +2023,7 @@ class BinaryOperations:
         - underlying: for typedefs, best-effort underlying declaration
         - source: local | library | unknown
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         type_name = str(name)
         tobj = None
@@ -2023,8 +2031,8 @@ class BinaryOperations:
 
         # 1) Try view local resolution first
         try:
-            if hasattr(self._current_view, "get_type_by_name"):
-                t = self._current_view.get_type_by_name(type_name)
+            if hasattr(bv, "get_type_by_name"):
+                t = bv.get_type_by_name(type_name)
                 if t is not None:
                     tobj = t
                     source = "local"
@@ -2034,7 +2042,7 @@ class BinaryOperations:
         # 2) Fall back to platform type libraries
         if tobj is None:
             try:
-                plat = getattr(self._current_view, "platform", None)
+                plat = getattr(bv, "platform", None)
                 libs = list(getattr(plat, "type_libraries", []) or []) if plat else []
                 for lib in libs:
                     get_t = getattr(lib, "get_type_by_name", None)
@@ -2177,7 +2185,7 @@ class BinaryOperations:
             "source": source,
         }
 
-    def get_strings(self, offset: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    def get_strings(self, offset: int = 0, limit: int = 100, *, view_id: str | None = None) -> list[dict[str, Any]]:
         """Get list of strings in the current binary view with pagination.
 
         Returns a list of dictionaries containing:
@@ -2186,23 +2194,22 @@ class BinaryOperations:
         - type: Binary Ninja string type (str if available)
         - value: best-effort decoded and escaped string value
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         results: list[dict[str, Any]] = []
 
         try:
             # Prefer modern API if available
             strings_iter = None
-            if hasattr(self._current_view, "get_strings"):
+            if hasattr(bv, "get_strings"):
                 try:
-                    strings_iter = self._current_view.get_strings()
+                    strings_iter = bv.get_strings()
                 except TypeError:
                     strings_iter = None
 
-            if strings_iter is None and hasattr(self._current_view, "strings"):
+            if strings_iter is None and hasattr(bv, "strings"):
                 try:
-                    strings_iter = list(self._current_view.strings)
+                    strings_iter = list(bv.strings)
                 except Exception:
                     strings_iter = []
 
@@ -2231,7 +2238,7 @@ class BinaryOperations:
                     # Best-effort read/decode if value is not present
                     if value is None and addr is not None and length is not None:
                         try:
-                            raw = self._current_view.read(addr, length)
+                            raw = bv.read(addr, length)
                             # Stop at first null byte if present
                             nul = raw.find(b"\x00")
                             if nul != -1:
@@ -2270,7 +2277,7 @@ class BinaryOperations:
             bn.log_error(f"Error getting strings: {e}")
             return []
 
-    def set_comment(self, address: int, comment: str) -> bool:
+    def set_comment(self, address: int, comment: str, *, view_id: str | None = None) -> bool:
         """Set a comment at a specific address.
 
         Args:
@@ -2280,22 +2287,21 @@ class BinaryOperations:
         Returns:
             True if the comment was set successfully, False otherwise
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            if not self._current_view.is_valid_offset(address):
+            if not bv.is_valid_offset(address):
                 bn.log_error(f"Invalid address for comment: {hex(address)}")
                 return False
 
-            self._current_view.set_comment_at(address, comment)
+            bv.set_comment_at(address, comment)
             bn.log_info(f"Set comment at {hex(address)}: {comment}")
             return True
         except Exception as e:
             bn.log_error(f"Failed to set comment: {e}")
             return False
 
-    def set_function_comment(self, identifier: str | int, comment: str) -> bool:
+    def set_function_comment(self, identifier: str | int, comment: str, *, view_id: str | None = None) -> bool:
         """Set a comment for a function.
 
         Args:
@@ -2305,23 +2311,22 @@ class BinaryOperations:
         Returns:
             True if the comment was set successfully, False otherwise
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            func = self.get_function_by_name_or_address(identifier)
+            func = self.get_function_by_name_or_address(identifier, view_id=view_id)
             if not func:
                 bn.log_error(f"Function not found: {identifier}")
                 return False
 
-            self._current_view.set_comment_at(func.start, comment)
+            bv.set_comment_at(func.start, comment)
             bn.log_info(f"Set comment for function {func.name} at {hex(func.start)}: {comment}")
             return True
         except Exception as e:
             bn.log_error(f"Failed to set function comment: {e}")
             return False
 
-    def get_comment(self, address: int) -> str | None:
+    def get_comment(self, address: int, *, view_id: str | None = None) -> str | None:
         """Get the comment at a specific address.
 
         Args:
@@ -2330,21 +2335,20 @@ class BinaryOperations:
         Returns:
             The comment text if found, None otherwise
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            if not self._current_view.is_valid_offset(address):
+            if not bv.is_valid_offset(address):
                 bn.log_error(f"Invalid address for comment: {hex(address)}")
                 return None
 
-            comment = self._current_view.get_comment_at(address)
+            comment = bv.get_comment_at(address)
             return comment if comment else None
         except Exception as e:
             bn.log_error(f"Failed to get comment: {e}")
             return None
 
-    def get_function_comment(self, identifier: str | int) -> str | None:
+    def get_function_comment(self, identifier: str | int, *, view_id: str | None = None) -> str | None:
         """Get the comment for a function.
 
         Args:
@@ -2353,41 +2357,38 @@ class BinaryOperations:
         Returns:
             The comment text if found, None otherwise
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            func = self.get_function_by_name_or_address(identifier)
+            func = self.get_function_by_name_or_address(identifier, view_id=view_id)
             if not func:
                 bn.log_error(f"Function not found: {identifier}")
                 return None
 
-            comment = self._current_view.get_comment_at(func.start)
+            comment = bv.get_comment_at(func.start)
             return comment if comment else None
         except Exception as e:
             bn.log_error(f"Failed to get function comment: {e}")
             return None
 
-    def delete_comment(self, address: int) -> bool:
+    def delete_comment(self, address: int, *, view_id: str | None = None) -> bool:
         """Delete a comment at a specific address"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            if self._current_view.is_valid_offset(address):
-                self._current_view.set_comment_at(address, None)
+            if bv.is_valid_offset(address):
+                bv.set_comment_at(address, None)
                 return True
         except Exception as e:
             bn.log_error(f"Failed to delete comment: {e}")
         return False
 
-    def delete_function_comment(self, identifier: str | int) -> bool:
+    def delete_function_comment(self, identifier: str | int, *, view_id: str | None = None) -> bool:
         """Delete a comment for a function"""
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        self._resolve_or_current(view_id)  # validates view exists
 
         try:
-            func = self.get_function_by_name_or_address(identifier)
+            func = self.get_function_by_name_or_address(identifier, view_id=view_id)
             if not func:
                 return False
 
@@ -2399,7 +2400,7 @@ class BinaryOperations:
 
     # set_integer_display removed per request
 
-    def get_assembly_function(self, identifier: str | int) -> str | None:
+    def get_assembly_function(self, identifier: str | int, *, view_id: str | None = None) -> str | None:
         """Get the assembly representation of a function with practical annotations.
 
         Args:
@@ -2408,11 +2409,10 @@ class BinaryOperations:
         Returns:
             Assembly code as string, or None if the function cannot be found
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            func = self.get_function_by_name_or_address(identifier)
+            func = self.get_function_by_name_or_address(identifier, view_id=view_id)
             if not func:
                 bn.log_error(f"Function not found: {identifier}")
                 return None
@@ -2442,13 +2442,13 @@ class BinaryOperations:
                     while current_addr < end_addr:
                         try:
                             # Get instruction length
-                            instr_len = self._current_view.get_instruction_length(current_addr)
+                            instr_len = bv.get_instruction_length(current_addr)
                             if instr_len <= 0:
                                 instr_len = 4  # Default to a reasonable instruction length
 
                             # Get disassembly for this instruction
                             line = self._get_instruction_with_annotations(
-                                current_addr, instr_len, var_map
+                                bv, current_addr, instr_len, var_map
                             )
                             if line:
                                 block_lines.append(line)
@@ -2477,13 +2477,13 @@ class BinaryOperations:
                         addr = block.start
                         while addr < block.end:
                             try:
-                                instr_len = self._current_view.get_instruction_length(addr)
+                                instr_len = bv.get_instruction_length(addr)
                                 if instr_len <= 0:
                                     instr_len = 4  # Default to a reasonable instruction length
 
                                 # Get disassembly for this instruction
                                 line = self._get_instruction_with_annotations(
-                                    addr, instr_len, var_map
+                                    bv, addr, instr_len, var_map
                                 )
                                 if line:
                                     block_lines.append(line)
@@ -2522,11 +2522,12 @@ class BinaryOperations:
             return None
 
     def _get_instruction_with_annotations(
-        self, addr: int, instr_len: int, var_map: dict[int, str]
+        self, bv: bn.BinaryView, addr: int, instr_len: int, var_map: dict[int, str]
     ) -> str | None:
         """Get a single instruction with practical annotations.
 
         Args:
+            bv: BinaryView to operate on
             addr: Address of the instruction
             instr_len: Length of the instruction
             var_map: Dictionary mapping offsets to variable names
@@ -2534,13 +2535,13 @@ class BinaryOperations:
         Returns:
             Formatted instruction string with annotations
         """
-        if not self._current_view:
+        if bv is None:
             return None
 
         try:
             # Get raw bytes for fallback
             try:
-                raw_bytes = self._current_view.read(addr, instr_len)
+                raw_bytes = bv.read(addr, instr_len)
                 hex_bytes = " ".join(f"{b:02x}" for b in raw_bytes)
             except Exception:
                 hex_bytes = "??"
@@ -2548,8 +2549,8 @@ class BinaryOperations:
             # Get basic disassembly
             disasm_text = ""
             try:
-                if hasattr(self._current_view, "get_disassembly"):
-                    disasm = self._current_view.get_disassembly(addr)
+                if hasattr(bv, "get_disassembly"):
+                    disasm = bv.get_disassembly(addr)
                     if disasm:
                         disasm_text = disasm
             except Exception:
@@ -2571,7 +2572,7 @@ class BinaryOperations:
                         call_addr = int(call_addr_str, 16)
 
                         # Look up the target function name
-                        sym = self._current_view.get_symbol_at(call_addr)
+                        sym = bv.get_symbol_at(call_addr)
                         if sym and hasattr(sym, "name"):
                             # Replace the address with the function name
                             disasm_text = disasm_text.replace(call_addr_str, sym.name)
@@ -2620,7 +2621,7 @@ class BinaryOperations:
             # Get comment if any
             comment = None
             try:
-                comment = self._current_view.get_comment_at(addr)
+                comment = bv.get_comment_at(addr)
             except Exception:
                 pass
 
@@ -2639,7 +2640,7 @@ class BinaryOperations:
             bn.log_error(f"Error annotating instruction at {hex(addr)}: {e!s}")
             return f"{addr:08x}  {hex_bytes} ; [Error: {e!s}]"
 
-    def get_functions_containing_address(self, address: int) -> list:
+    def get_functions_containing_address(self, address: int, *, view_id: str | None = None) -> list:
         """Get functions containing a specific address.
 
         Args:
@@ -2648,26 +2649,22 @@ class BinaryOperations:
         Returns:
             List of function names containing the address
         """
-        if not self.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
-            functions = list(self.current_view.get_functions_containing(address))
+            functions = list(bv.get_functions_containing(address))
             return [func.name for func in functions]
         except Exception as e:
             bn.log_error(f"Error getting functions containing address {hex(address)}: {e}")
             return []
 
-    def get_entry_points(self) -> list[dict[str, Any]]:
+    def get_entry_points(self, *, view_id: str | None = None) -> list[dict[str, Any]]:
         """Return entry point(s) for the current binary view.
 
         Primarily uses `bv.entry_point`. Also includes common startup symbols like
         `_start` when resolvable.
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
-
-        bv = self._current_view
+        bv = self._resolve_or_current(view_id)
         results: list[dict[str, Any]] = []
 
         def _append(addr: int):
@@ -2720,7 +2717,7 @@ class BinaryOperations:
 
     # Removed: get_function_code_references() in favor of address-based get_xrefs_to_* helpers
 
-    def get_user_defined_type(self, type_name: str) -> dict[str, Any] | None:
+    def get_user_defined_type(self, type_name: str, *, view_id: str | None = None) -> dict[str, Any] | None:
         """Get the definition of a user-defined type (struct, enum, etc.)
 
         Args:
@@ -2729,14 +2726,13 @@ class BinaryOperations:
         Returns:
             Dictionary with type information and definition, or None if not found
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         try:
             # Check if we have a user type container
             if (
-                not hasattr(self._current_view, "user_type_container")
-                or not self._current_view.user_type_container
+                not hasattr(bv, "user_type_container")
+                or not bv.user_type_container
             ):
                 bn.log_info("No user type container available")
                 return None
@@ -2745,8 +2741,8 @@ class BinaryOperations:
             found_type = None
             found_type_id = None
 
-            for type_id in self._current_view.user_type_container.types.keys():
-                current_type = self._current_view.user_type_container.types[type_id]
+            for type_id in bv.user_type_container.types.keys():
+                current_type = bv.user_type_container.types[type_id]
                 type_name_from_container = current_type[0]
 
                 if type_name_from_container == type_name:
@@ -2809,7 +2805,7 @@ class BinaryOperations:
             bn.log_error(f"Error getting user-defined type {type_name}: {e}")
             return None
 
-    def get_xrefs_to_address(self, address: int | str) -> dict[str, Any]:
+    def get_xrefs_to_address(self, address: int | str, *, view_id: str | None = None) -> dict[str, Any]:
         """Get all cross references (code and data) to a given address.
 
         Args:
@@ -2818,8 +2814,7 @@ class BinaryOperations:
         Returns:
             Dictionary with address, code_references, and data_references lists
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         # Normalize address to int
         try:
@@ -2838,8 +2833,8 @@ class BinaryOperations:
 
         # Code references
         try:
-            if hasattr(self._current_view, "get_code_refs"):
-                for ref in list(self._current_view.get_code_refs(addr)):
+            if hasattr(bv, "get_code_refs"):
+                for ref in list(bv.get_code_refs(addr)):
                     try:
                         fn_name = ref.function.name if getattr(ref, "function", None) else None
                         entry = {"function": fn_name, "address": hex(ref.address)}
@@ -2850,7 +2845,7 @@ class BinaryOperations:
                             func = (
                                 ref.function
                                 if getattr(ref, "function", None)
-                                else self._current_view.get_function_at(ref.address)
+                                else bv.get_function_at(ref.address)
                             )
                             if func is not None:
                                 import re as _re
@@ -2905,7 +2900,7 @@ class BinaryOperations:
                                         return ""
 
                                 try:
-                                    xdis = self._current_view.get_disassembly(ref.address) or ""
+                                    xdis = bv.get_disassembly(ref.address) or ""
                                 except Exception:
                                     xdis = ""
                                 dest = _canon_reg(_first_op_reg(xdis))
@@ -2917,9 +2912,9 @@ class BinaryOperations:
                                     while steps > 0 and curr < getattr(
                                         func, "highest_address", curr + 1024
                                     ):
-                                        ilen = self._current_view.get_instruction_length(curr) or 1
+                                        ilen = bv.get_instruction_length(curr) or 1
                                         try:
-                                            dis = self._current_view.get_disassembly(curr) or ""
+                                            dis = bv.get_disassembly(curr) or ""
                                         except Exception:
                                             dis = ""
                                         # detect clobber of the arg register
@@ -2938,11 +2933,11 @@ class BinaryOperations:
                                                 except Exception:
                                                     tgt = None
                                             if tgt is not None:
-                                                sym = self._current_view.get_symbol_at(tgt)
+                                                sym = bv.get_symbol_at(tgt)
                                                 if sym and hasattr(sym, "name"):
                                                     entry["following_call_target"] = sym.name
                                                 else:
-                                                    tfn = self._current_view.get_function_at(tgt)
+                                                    tfn = bv.get_function_at(tgt)
                                                     entry["following_call_target"] = (
                                                         tfn.name
                                                         if (tfn and hasattr(tfn, "name"))
@@ -2962,10 +2957,10 @@ class BinaryOperations:
 
         # Data references
         try:
-            if hasattr(self._current_view, "get_data_refs"):
-                for ref_addr in list(self._current_view.get_data_refs(addr)):
+            if hasattr(bv, "get_data_refs"):
+                for ref_addr in list(bv.get_data_refs(addr)):
                     try:
-                        fn = self._current_view.get_function_at(ref_addr)
+                        fn = bv.get_function_at(ref_addr)
                         fn_name = fn.name if fn else None
                         result["data_references"].append(
                             {"function": fn_name, "address": hex(ref_addr)}
@@ -2977,7 +2972,7 @@ class BinaryOperations:
 
         return result
 
-    def get_xrefs_to_field(self, struct_name: str, field_name: str) -> list[dict[str, Any]]:
+    def get_xrefs_to_field(self, struct_name: str, field_name: str, *, view_id: str | None = None) -> list[dict[str, Any]]:
         """Get all cross references to a named struct field (member).
 
         This uses a best-effort heuristic:
@@ -2985,8 +2980,7 @@ class BinaryOperations:
         - If a global instance of the struct is found, computes the field's absolute
           address (base + offset) and includes code refs to that address
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         struct_name = str(struct_name).strip()
         field_name = str(field_name).strip()
@@ -2995,8 +2989,8 @@ class BinaryOperations:
         # Try to resolve struct member offset
         member_offset = None
         try:
-            if hasattr(self._current_view, "types") and self._current_view.types:
-                for t in self._current_view.types.values():
+            if hasattr(bv, "types") and bv.types:
+                for t in bv.types.values():
                     try:
                         if (
                             getattr(t, "name", None) == struct_name
@@ -3018,7 +3012,7 @@ class BinaryOperations:
         import re
 
         pattern = re.compile(rf"(\.|->)\s*{re.escape(field_name)}(\b|\W)")
-        for func in list(self._current_view.functions):
+        for func in list(bv.functions):
             try:
                 if not hasattr(func, "hlil") or not func.hlil:
                     continue
@@ -3042,11 +3036,11 @@ class BinaryOperations:
         # If we know the member offset, try to find global instances and code-refs
         if member_offset is not None:
             try:
-                for var_addr in list(self._current_view.data_vars):
+                for var_addr in list(bv.data_vars):
                     try:
                         t = None
-                        if hasattr(self._current_view, "get_type_at"):
-                            t = self._current_view.get_type_at(var_addr)
+                        if hasattr(bv, "get_type_at"):
+                            t = bv.get_type_at(var_addr)
                         t_str = str(t) if t is not None else ""
                         # crude match for exact or pointer to struct
                         if (
@@ -3057,7 +3051,7 @@ class BinaryOperations:
                             field_addr = var_addr + member_offset
                             # code refs to this absolute address
                             try:
-                                for ref in list(self._current_view.get_code_refs(field_addr)):
+                                for ref in list(bv.get_code_refs(field_addr)):
                                     fn_name = (
                                         ref.function.name
                                         if getattr(ref, "function", None)
@@ -3080,7 +3074,7 @@ class BinaryOperations:
 
         return results
 
-    def get_xrefs_to_type(self, type_name: str) -> dict[str, Any]:
+    def get_xrefs_to_type(self, type_name: str, *, view_id: str | None = None) -> dict[str, Any]:
         """Get cross references/usages related to a struct/type name.
 
         Best-effort heuristics:
@@ -3088,8 +3082,7 @@ class BinaryOperations:
         - Scans HLIL text for instructions mentioning the type (casts/annotations)
         - Marks functions whose signature mentions the type
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         type_name = str(type_name).strip()
         tnl = type_name.lower()
@@ -3104,14 +3097,14 @@ class BinaryOperations:
 
         # 1) Global data variables whose type matches the type name
         try:
-            for var_addr in list(self._current_view.data_vars):
+            for var_addr in list(bv.data_vars):
                 try:
                     t = None
-                    if hasattr(self._current_view, "get_type_at"):
-                        t = self._current_view.get_type_at(var_addr)
+                    if hasattr(bv, "get_type_at"):
+                        t = bv.get_type_at(var_addr)
                     t_str = str(t) if t is not None else ""
                     if t_str and tnl in t_str.lower():
-                        sym = self._current_view.get_symbol_at(var_addr)
+                        sym = bv.get_symbol_at(var_addr)
                         result["data_instances"].append(
                             {
                                 "address": hex(var_addr),
@@ -3121,8 +3114,8 @@ class BinaryOperations:
                         )
                         # Also add code refs to this global
                         try:
-                            if hasattr(self._current_view, "get_code_refs"):
-                                for ref in list(self._current_view.get_code_refs(var_addr)):
+                            if hasattr(bv, "get_code_refs"):
+                                for ref in list(bv.get_code_refs(var_addr)):
                                     fn_name = (
                                         ref.function.name
                                         if getattr(ref, "function", None)
@@ -3148,7 +3141,7 @@ class BinaryOperations:
 
             # Look for the type name as a word or part of a cast/annotation
             pat = re.compile(re.escape(type_name), re.IGNORECASE)
-            for func in list(self._current_view.functions):
+            for func in list(bv.functions):
                 try:
                     if hasattr(func, "hlil") and func.hlil:
                         for ins in func.hlil.instructions:
@@ -3184,15 +3177,14 @@ class BinaryOperations:
 
         return result
 
-    def get_xrefs_to_enum(self, enum_name: str) -> dict[str, Any]:
+    def get_xrefs_to_enum(self, enum_name: str, *, view_id: str | None = None) -> dict[str, Any]:
         """Find usages of an enum by matching its member values in code and variables.
 
         Notes:
         - Enums are values, not addresses; there are no traditional "data references" to enums.
         - This scans for immediate constants equal to enum members and common bitmask checks.
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         enum_name_str = str(enum_name).strip()
         en_lower = enum_name_str.lower()
@@ -3206,7 +3198,7 @@ class BinaryOperations:
         # Locate the enum type and collect members
         enum_type = None
         try:
-            for t in self._current_view.types.values():
+            for t in bv.types.values():
                 try:
                     # Match by exact name or case-insensitive
                     if getattr(t, "type_class", None) == TypeClass.EnumerationTypeClass:
@@ -3222,7 +3214,7 @@ class BinaryOperations:
         # If not found by exact name, try substring match
         if enum_type is None:
             try:
-                for t in self._current_view.types.values():
+                for t in bv.types.values():
                     try:
                         if getattr(t, "type_class", None) == TypeClass.EnumerationTypeClass:
                             tname = getattr(t, "name", "")
@@ -3266,7 +3258,7 @@ class BinaryOperations:
             )
 
         # Scan functions for matches
-        for func in list(self._current_view.functions):
+        for func in list(bv.functions):
             try:
                 if hasattr(func, "hlil") and func.hlil:
                     for ins in func.hlil.instructions:
@@ -3303,7 +3295,7 @@ class BinaryOperations:
 
         return result
 
-    def get_xrefs_to_struct(self, struct_name: str) -> dict[str, Any]:
+    def get_xrefs_to_struct(self, struct_name: str, *, view_id: str | None = None) -> dict[str, Any]:
         """Get cross references/usages related specifically to a struct name.
 
         Includes:
@@ -3314,8 +3306,7 @@ class BinaryOperations:
         - code_references: HLIL lines with member access (".field"/"->field")
         - functions_with_type: functions whose signatures mention the struct
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         name = str(struct_name).strip()
         name_l = name.lower()
@@ -3355,7 +3346,7 @@ class BinaryOperations:
         # Resolve the struct type and members
         members = []
         try:
-            for t in self._current_view.types.values():
+            for t in bv.types.values():
                 try:
                     if getattr(t, "type_class", None) == TypeClass.StructureTypeClass:
                         tname = getattr(t, "name", None)
@@ -3390,16 +3381,16 @@ class BinaryOperations:
         # Gather globals with this struct in their type string
         global_instances: list[int] = []
         try:
-            for var_addr in list(self._current_view.data_vars):
+            for var_addr in list(bv.data_vars):
                 try:
                     t = None
-                    if hasattr(self._current_view, "get_type_at"):
-                        t = self._current_view.get_type_at(var_addr)
+                    if hasattr(bv, "get_type_at"):
+                        t = bv.get_type_at(var_addr)
                     t_str = str(t) if t is not None else ""
                     if t_str:
                         tl = t_str.lower()
                         if name_l in tl or any(cn in tl for cn in candidate_names_l):
-                            sym = self._current_view.get_symbol_at(var_addr)
+                            sym = bv.get_symbol_at(var_addr)
                             out["data_instances"].append(
                                 {
                                     "address": hex(var_addr),
@@ -3410,8 +3401,8 @@ class BinaryOperations:
                             global_instances.append(var_addr)
                             # Code refs to the variable itself
                         try:
-                            if hasattr(self._current_view, "get_code_refs"):
-                                for ref in list(self._current_view.get_code_refs(var_addr)):
+                            if hasattr(bv, "get_code_refs"):
+                                for ref in list(bv.get_code_refs(var_addr)):
                                     fn_name = (
                                         ref.function.name
                                         if getattr(ref, "function", None)
@@ -3434,7 +3425,7 @@ class BinaryOperations:
         # Also gather symbol-based instances whose name mentions the struct alias
         symbol_instances: list[int] = []
         try:
-            for sym in list(self._current_view.get_symbols()):
+            for sym in list(bv.get_symbols()):
                 try:
                     sname = getattr(sym, "name", "") or ""
                     sfull = getattr(sym, "full_name", "") or ""
@@ -3453,8 +3444,8 @@ class BinaryOperations:
                             symbol_instances.append(addr)
                             # code refs to this symbol
                             try:
-                                if hasattr(self._current_view, "get_code_refs"):
-                                    for ref in list(self._current_view.get_code_refs(addr)):
+                                if hasattr(bv, "get_code_refs"):
+                                    for ref in list(bv.get_code_refs(addr)):
                                         fn_name = (
                                             ref.function.name
                                             if getattr(ref, "function", None)
@@ -3484,8 +3475,8 @@ class BinaryOperations:
                             if off is None:
                                 continue
                             field_addr = base + int(off)
-                            if hasattr(self._current_view, "get_code_refs"):
-                                for ref in list(self._current_view.get_code_refs(field_addr)):
+                            if hasattr(bv, "get_code_refs"):
+                                for ref in list(bv.get_code_refs(field_addr)):
                                     fn_name = (
                                         ref.function.name
                                         if getattr(ref, "function", None)
@@ -3507,7 +3498,7 @@ class BinaryOperations:
         # If the struct is contained as a field of another struct, try deriving field addresses from parent instances
         try:
             parent_offsets: list[dict[str, Any]] = []
-            for t in self._current_view.types.values():
+            for t in bv.types.values():
                 try:
                     if getattr(t, "type_class", None) == TypeClass.StructureTypeClass:
                         tname = getattr(t, "name", None)
@@ -3547,16 +3538,16 @@ class BinaryOperations:
                 parent_name = po.get("parent")
                 try:
                     # scan data variables
-                    for var_addr in list(self._current_view.data_vars):
+                    for var_addr in list(bv.data_vars):
                         try:
                             t = None
-                            if hasattr(self._current_view, "get_type_at"):
-                                t = self._current_view.get_type_at(var_addr)
+                            if hasattr(bv, "get_type_at"):
+                                t = bv.get_type_at(var_addr)
                             t_str = str(t) if t is not None else ""
                             if t_str and parent_name and parent_name.lower() in t_str.lower():
                                 field_addr = var_addr + poff
-                                if hasattr(self._current_view, "get_code_refs"):
-                                    for ref in list(self._current_view.get_code_refs(field_addr)):
+                                if hasattr(bv, "get_code_refs"):
+                                    for ref in list(bv.get_code_refs(field_addr)):
                                         fn_name = (
                                             ref.function.name
                                             if getattr(ref, "function", None)
@@ -3573,7 +3564,7 @@ class BinaryOperations:
                         except Exception:
                             continue
                     # scan symbols with parent type in name
-                    for sym in list(self._current_view.get_symbols()):
+                    for sym in list(bv.get_symbols()):
                         try:
                             sname = getattr(sym, "name", "") or ""
                             sfull = getattr(sym, "full_name", "") or ""
@@ -3582,9 +3573,9 @@ class BinaryOperations:
                                 addr = getattr(sym, "address", None)
                                 if isinstance(addr, int):
                                     field_addr = addr + poff
-                                    if hasattr(self._current_view, "get_code_refs"):
+                                    if hasattr(bv, "get_code_refs"):
                                         for ref in list(
-                                            self._current_view.get_code_refs(field_addr)
+                                            bv.get_code_refs(field_addr)
                                         ):
                                             fn_name = (
                                                 ref.function.name
@@ -3620,7 +3611,7 @@ class BinaryOperations:
                     re.compile(rf"(\.|->)\s*{re.escape(str(nm))}(\b|\W)", re.IGNORECASE)
                 )
 
-            for func in list(self._current_view.functions):
+            for func in list(bv.functions):
                 try:
                     # Capture variables whose type mentions the struct
                     try:
@@ -3695,7 +3686,7 @@ class BinaryOperations:
 
         return out
 
-    def get_xrefs_to_union(self, union_name: str) -> dict[str, Any]:
+    def get_xrefs_to_union(self, union_name: str, *, view_id: str | None = None) -> dict[str, Any]:
         """Get cross references/usages related to a union type by name.
 
         Includes:
@@ -3707,8 +3698,7 @@ class BinaryOperations:
         - vars_with_type: function-local variables typed as the union
         - code_references_by_cast: HLIL lines with explicit casts mentioning the union
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         name = str(union_name).strip()
         name_l = name.lower()
@@ -3727,7 +3717,7 @@ class BinaryOperations:
         # Resolve union members
         members: list[dict[str, Any]] = []
         try:
-            for t in self._current_view.types.values():
+            for t in bv.types.values():
                 try:
                     # Union types are presented via StructureTypeClass with UnionStructureType variant
                     if getattr(t, "type_class", None) == TypeClass.StructureTypeClass:
@@ -3768,14 +3758,14 @@ class BinaryOperations:
 
         # Gather globals with this union in their type string
         try:
-            for var_addr in list(self._current_view.data_vars):
+            for var_addr in list(bv.data_vars):
                 try:
                     t = None
-                    if hasattr(self._current_view, "get_type_at"):
-                        t = self._current_view.get_type_at(var_addr)
+                    if hasattr(bv, "get_type_at"):
+                        t = bv.get_type_at(var_addr)
                     t_str = str(t) if t is not None else ""
                     if t_str and name_l in t_str.lower():
-                        sym = self._current_view.get_symbol_at(var_addr)
+                        sym = bv.get_symbol_at(var_addr)
                         out["data_instances"].append(
                             {
                                 "address": hex(var_addr),
@@ -3785,8 +3775,8 @@ class BinaryOperations:
                         )
                         # Code refs to that variable
                         try:
-                            if hasattr(self._current_view, "get_code_refs"):
-                                for ref in list(self._current_view.get_code_refs(var_addr)):
+                            if hasattr(bv, "get_code_refs"):
+                                for ref in list(bv.get_code_refs(var_addr)):
                                     fn_name = (
                                         ref.function.name
                                         if getattr(ref, "function", None)
@@ -3819,7 +3809,7 @@ class BinaryOperations:
                     re.compile(rf"(\.|->)\s*{re.escape(str(nm))}(\b|\W)", re.IGNORECASE)
                 )
 
-            for func in list(self._current_view.functions):
+            for func in list(bv.functions):
                 try:
                     # variables typed as this union
                     try:
@@ -3903,7 +3893,12 @@ class BinaryOperations:
         return out
 
     def patch_bytes(
-        self, address: str | int, data: str | bytes | list[int], save_to_file: bool = True
+        self,
+        address: str | int,
+        data: str | bytes | list[int],
+        save_to_file: bool = True,
+        *,
+        view_id: str | None = None,
     ) -> dict[str, Any]:
         """Patch bytes at a given address in the binary.
 
@@ -3922,8 +3917,7 @@ class BinaryOperations:
             RuntimeError: If no binary is loaded
             ValueError: If address or data format is invalid
         """
-        if not self._current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self._resolve_or_current(view_id)
 
         # Parse address
         # Only treat as hex if it has "0x" prefix or contains a-f/A-F characters
@@ -3972,7 +3966,7 @@ class BinaryOperations:
 
         # Read original bytes for comparison
         try:
-            original_bytes = self._current_view.read(addr, len(patch_bytes))
+            original_bytes = bv.read(addr, len(patch_bytes))
             if original_bytes is None:
                 original_bytes = b""
         except Exception as e:
@@ -3981,7 +3975,7 @@ class BinaryOperations:
 
         # Write the patch
         try:
-            written = self._current_view.write(addr, patch_bytes)
+            written = bv.write(addr, patch_bytes)
 
             # Determine status based on whether all bytes were written
             if written != len(patch_bytes):
@@ -4008,10 +4002,10 @@ class BinaryOperations:
             if save_to_file:
                 try:
                     # Get the original file path
-                    original_file = self._current_view.file.filename
+                    original_file = bv.file.filename
                     if original_file:
                         # Save the patched binary back to the original file
-                        if self._current_view.save(original_file):
+                        if bv.save(original_file):
                             result["saved_to_file"] = True
                             result["saved_path"] = original_file
                             bn.log_info(f"Patched binary saved to: {original_file}")

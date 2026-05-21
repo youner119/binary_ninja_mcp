@@ -117,7 +117,14 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             return {}
 
         content_type = self.headers.get("Content-Type", "")
-        post_data = self.rfile.read(content_length).decode("utf-8")
+        # _check_binary_loaded may have already consumed and cached the body
+        # to peek for view_id; reuse that instead of trying to re-read rfile
+        # (which would return empty since the stream is already drained).
+        if hasattr(self, "_cached_post_body"):
+            post_data = self._cached_post_body
+        else:
+            post_data = self.rfile.read(content_length).decode("utf-8")
+            self._cached_post_body = post_data
 
         bn.log_info(f"Received POST data: {post_data}")
         bn.log_info(f"Content-Type: {content_type}")
@@ -231,7 +238,32 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             return '""'
 
     def _check_binary_loaded(self):
-        """Check if a binary is loaded and return appropriate error response if not"""
+        """Check if a binary is loaded and return appropriate error response if not.
+
+        Phase 2: if the request supplies view_id, defer the existence check to
+        the route handler (which calls resolve_view → 404 on missing). Only fall
+        back to the legacy _current_view check when no view_id is provided.
+        """
+        try:
+            params = self._parse_query_params()
+            if params.get("view_id"):
+                return True
+        except Exception:
+            pass
+        # POST bodies (axios from the bridge sends application/json) carry
+        # view_id in the body, not the query string. Peek the body once and
+        # cache it so _parse_post_params can reuse it without re-reading.
+        if getattr(self, "command", None) == "POST":
+            try:
+                content_type = self.headers.get("Content-Type", "")
+                content_length = int(self.headers.get("Content-Length", 0) or 0)
+                if content_length > 0 and "application/json" in content_type.lower():
+                    if not hasattr(self, "_cached_post_body"):
+                        self._cached_post_body = self.rfile.read(content_length).decode("utf-8")
+                    if '"view_id"' in self._cached_post_body:
+                        return True
+            except Exception:
+                pass
         if not self.binary_ops or not self.binary_ops.current_view:
             self._send_json_response({"error": "No binary loaded"}, 400)
             return False
@@ -286,20 +318,36 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 self._send_json_response(status)
 
             elif path == "/functions" or path == "/methods":
-                functions = self.binary_ops.get_function_names(offset, limit)
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                functions = self.binary_ops.get_function_names(offset, limit, view_id=view_id)
                 bn.log_info(f"Found {len(functions)} functions")
                 self._send_json_response({"functions": functions})
 
             elif path == "/classes":
-                classes = self.binary_ops.get_class_names(offset, limit)
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                classes = self.binary_ops.get_class_names(offset, limit, view_id=view_id)
                 self._send_json_response({"classes": classes})
 
             elif path == "/segments":
-                segments = self.binary_ops.get_segments(offset, limit)
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                segments = self.binary_ops.get_segments(offset, limit, view_id=view_id)
                 self._send_json_response({"segments": segments})
 
             elif path == "/imports":
-                imports = self.endpoints.get_imports(offset, limit)
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                imports = self.endpoints.get_imports(offset, limit, view_id=view_id)
                 self._send_json_response({"imports": imports})
 
             elif path == "/binaries" or path == "/views":
@@ -325,28 +373,48 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response(self.endpoints.select_binary(ident))
 
             elif path == "/exports":
-                exports = self.endpoints.get_exports(offset, limit)
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                exports = self.endpoints.get_exports(offset, limit, view_id=view_id)
                 self._send_json_response({"exports": exports})
             elif path == "/sections":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
-                    sections = self.binary_ops.get_sections(offset, limit)
+                    sections = self.binary_ops.get_sections(offset, limit, view_id=view_id)
                     self._send_json_response({"sections": sections})
                 except Exception as e:
                     bn.log_error(f"Error getting sections: {e}")
                     self._send_json_response({"error": str(e)}, 500)
             elif path == "/entryPoints":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
-                    eps = self.endpoints.get_entry_points()
+                    eps = self.binary_ops.get_entry_points(view_id=view_id)
                     self._send_json_response({"entry_points": eps})
                 except Exception as e:
                     bn.log_error(f"Error handling entryPoints: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/namespaces":
-                namespaces = self.endpoints.get_namespaces(offset, limit)
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
+                namespaces = self.endpoints.get_namespaces(offset, limit, view_id=view_id)
                 self._send_json_response({"namespaces": namespaces})
 
             elif path == "/data":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     # length: desired byte count to read for preview; negative means "read exact defined size"
                     length_param = params.get("length")
@@ -358,13 +426,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     else:
                         # Default: read exact defined size when available
                         read_len = -1
-                    data_items = self.binary_ops.get_defined_data(offset, limit, read_len)
+                    data_items = self.binary_ops.get_defined_data(offset, limit, read_len, view_id=view_id)
                     self._send_json_response({"data": data_items})
                 except Exception as e:
                     bn.log_error(f"Error getting data items: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/localTypes":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     include_libs = params.get("includeLibraries") in (
                         "1",
@@ -372,7 +444,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         "True",
                     )
                     types = self.binary_ops.list_local_types(
-                        offset, limit, include_libraries=include_libs
+                        offset, limit, include_libraries=include_libs, view_id=view_id
                     )
                     bn.log_info(
                         f"/localTypes returned {len(types)} entries (offset={offset}, limit={limit})"
@@ -383,6 +455,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/searchTypes":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     term = params.get("query") or params.get("q")
                     if not term:
@@ -407,7 +483,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     # First compute total
                     all_matches = self.binary_ops.search_local_types(
-                        term, 0, -1, include_libraries=include_libs
+                        term, 0, -1, include_libraries=include_libs, view_id=view_id
                     )
                     page = (
                         all_matches[offset:]
@@ -429,27 +505,39 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/strings":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     bn.log_info(
                         f"/strings request: offset={offset}, limit={limit}, raw_params={params}"
                     )
-                    strings = self.binary_ops.get_strings(offset, limit)
+                    strings = self.binary_ops.get_strings(offset, limit, view_id=view_id)
                     self._send_json_response({"strings": strings})
                 except Exception as e:
                     bn.log_error(f"Error getting strings: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/allStrings":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     # Return all strings without pagination
                     bn.log_info("/allStrings request received")
-                    strings = self.binary_ops.get_strings(0, 2147483647)
+                    strings = self.binary_ops.get_strings(0, 2147483647, view_id=view_id)
                     self._send_json_response({"strings": strings})
                 except Exception as e:
                     bn.log_error(f"Error getting all strings: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/hexdump":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     address_str = params.get("address")
                     if not address_str:
@@ -488,7 +576,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     # If negative, try to use exact defined size at this address
                     if read_len < 0:
                         try:
-                            inferred = self.binary_ops.infer_data_size(addr)
+                            inferred = self.binary_ops.infer_data_size(addr, view_id=view_id)
                             if inferred is not None and inferred > 0:
                                 read_len = int(inferred)
                         except Exception:
@@ -499,7 +587,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     # Read bytes
                     try:
-                        data = self.binary_ops.current_view.read(addr, read_len)
+                        _bv = self.binary_ops._resolve_or_current(view_id)
+                        data = _bv.read(addr, read_len)
                         if data is None:
                             data = b""
                     except Exception:
@@ -508,7 +597,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     # Resolve symbol name for header label
                     label = None
                     try:
-                        sym = self.binary_ops.current_view.get_symbol_at(addr)
+                        _bv = self.binary_ops._resolve_or_current(view_id)
+                        sym = _bv.get_symbol_at(addr)
                         if sym and hasattr(sym, "name"):
                             label = sym.name
                     except Exception:
@@ -560,6 +650,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"Error: {e}\n".encode())
 
             elif path == "/hexdumpByName":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     name = params.get("name") or params.get("symbol") or params.get("raw_name")
                     if not name:
@@ -581,7 +675,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         read_len = -1
                     if read_len < 0:
                         try:
-                            inferred = self.binary_ops.infer_data_size(addr)
+                            inferred = self.binary_ops.infer_data_size(addr, view_id=view_id)
                             if inferred is not None and inferred > 0:
                                 read_len = int(inferred)
                         except Exception:
@@ -591,7 +685,8 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     # Read and format
                     try:
-                        data = self.binary_ops.current_view.read(addr, read_len) or b""
+                        _bv = self.binary_ops._resolve_or_current(view_id)
+                        data = _bv.read(addr, read_len) or b""
                     except Exception:
                         data = b""
 
@@ -635,6 +730,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(f"Error: {e}\n".encode())
 
             elif path == "/getDataDecl":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     ident = (
                         params.get("name")
@@ -660,7 +759,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     size = None
                     type_text = None
                     try:
-                        bv = self.binary_ops.current_view
+                        bv = self.binary_ops._resolve_or_current(view_id)
                         dv = bv.get_data_var_at(addr) if hasattr(bv, "get_data_var_at") else None
                         typ_obj = (
                             dv.type
@@ -675,7 +774,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         pass
                     if size is None:
                         try:
-                            inferred = self.binary_ops.infer_data_size(addr)
+                            inferred = self.binary_ops.infer_data_size(addr, view_id=view_id)
                             if inferred and inferred > 0:
                                 size = int(inferred)
                         except Exception:
@@ -685,7 +784,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     # Read bytes
                     try:
-                        raw = self.binary_ops.current_view.read(addr, size) or b""
+                        raw = self.binary_ops._resolve_or_current(view_id).read(addr, size) or b""
                     except Exception:
                         raw = b""
 
@@ -755,13 +854,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/strings/filter":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 try:
                     pattern = params.get("filter", "")
                     bn.log_info(
                         f"/strings/filter request: offset={offset}, limit={limit}, pattern={pattern}"
                     )
                     # Get all strings first, then filter and paginate
-                    all_strings = self.binary_ops.get_strings(0, 2147483647)
+                    all_strings = self.binary_ops.get_strings(0, 2147483647, view_id=view_id)
                     if pattern:
                         pl = pattern.lower()
                         filtered = [
@@ -778,11 +881,19 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/searchFunctions":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 search_term = params.get("query", "")
-                matches = self.endpoints.search_functions(search_term, offset, limit)
+                matches = self.endpoints.search_functions(search_term, offset, limit, view_id=view_id)
                 self._send_json_response({"matches": matches})
 
             elif path == "/getCallers":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 identifiers = self._extract_identifiers(params)
                 if not identifiers:
                     self._send_json_response(
@@ -794,7 +905,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    payload = self.binary_ops.get_callers(identifiers)
+                    payload = self.binary_ops.get_callers(identifiers, view_id=view_id)
                 except Exception as e:
                     bn.log_error(f"Error handling getCallers: {e}")
                     self._send_json_response({"error": str(e)}, 500)
@@ -802,6 +913,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response(payload)
 
             elif path == "/getCallees":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 identifiers = self._extract_identifiers(params)
                 if not identifiers:
                     self._send_json_response(
@@ -813,7 +928,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    payload = self.binary_ops.get_callees(identifiers)
+                    payload = self.binary_ops.get_callees(identifiers, view_id=view_id)
                 except Exception as e:
                     bn.log_error(f"Error handling getCallees: {e}")
                     self._send_json_response({"error": str(e)}, 500)
@@ -821,6 +936,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response(payload)
 
             elif path == "/decompile":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("name") or params.get("functionName")
                 if not function_name:
                     self._send_json_response(
@@ -832,9 +951,13 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
                 lang = (params.get("lang") or "hlil").strip().lower()
 
-                self._handle_decompile(function_name, lang=lang)
+                self._handle_decompile(function_name, lang=lang, view_id=view_id)
 
             elif path == "/decompileToFile":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("name") or params.get("functionName")
                 if not function_name:
                     self._send_json_response(
@@ -852,7 +975,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 lang = (params.get("lang") or "hlil").strip().lower()
 
                 try:
-                    decompiled = self.binary_ops.decompile_function(function_name, lang=lang)
+                    decompiled = self.binary_ops.decompile_function(function_name, lang=lang, view_id=view_id)
                     if decompiled is None:
                         self._send_json_response(
                             {"error": "Decompilation failed", "function": function_name},
@@ -865,7 +988,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         f.write(decompiled)
 
                     line_count = decompiled.count("\n") + 1
-                    func_info = self.binary_ops.get_function_info(function_name)
+                    func_info = self.binary_ops.get_function_info(function_name, view_id=view_id)
                     self._send_json_response({
                         "ok": True,
                         "path": output_path,
@@ -878,6 +1001,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/batchDecompileToFile":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 output_dir = params.get("outputDir") or params.get("output_dir")
                 if not output_dir:
                     self._send_json_response(
@@ -888,10 +1015,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     os.makedirs(output_dir, exist_ok=True)
-                    bv = self.binary_ops.current_view
-                    if not bv:
-                        self._send_json_response({"error": "No binary loaded"}, 400)
-                        return
+                    bv = self.binary_ops._resolve_or_current(view_id)
 
                     saved = []
                     skipped = []
@@ -911,7 +1035,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                             continue
 
                         try:
-                            decompiled = self.binary_ops.decompile_function(func.name)
+                            decompiled = self.binary_ops.decompile_function(func.name, view_id=view_id)
                             if decompiled:
                                 safe_name = func.name.replace("/", "_").replace("\\", "_")
                                 fpath = os.path.join(output_dir, f"{safe_name}.txt")
@@ -935,6 +1059,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/saveBndb":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 output_path = params.get("outputPath") or params.get("output_path")
                 if not output_path:
                     self._send_json_response(
@@ -944,10 +1072,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
 
                 try:
-                    bv = self.binary_ops.current_view
-                    if not bv:
-                        self._send_json_response({"error": "No binary loaded"}, 400)
-                        return
+                    bv = self.binary_ops._resolve_or_current(view_id)
 
                     # Ensure .bndb extension
                     if not output_path.endswith(".bndb"):
@@ -966,6 +1091,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/assembly":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("name") or params.get("functionName")
                 if not function_name:
                     self._send_json_response(
@@ -977,21 +1106,21 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
 
                 try:
-                    func_info = self.binary_ops.get_function_info(function_name)
+                    func_info = self.binary_ops.get_function_info(function_name, view_id=view_id)
                     if not func_info:
                         bn.log_error(f"Function not found: {function_name}")
                         self._send_json_response(
                             {
                                 "error": "Function not found",
                                 "requested_name": function_name,
-                                "available_functions": self.binary_ops.get_function_names(0, 10),
+                                "available_functions": self.binary_ops.get_function_names(0, 10, view_id=view_id),
                             },
                             404,
                         )
                         return
 
                     bn.log_info(f"Found function for assembly: {func_info}")
-                    assembly = self.binary_ops.get_assembly_function(function_name)
+                    assembly = self.binary_ops.get_assembly_function(function_name, view_id=view_id)
 
                     if assembly is None:
                         self._send_json_response(
@@ -1019,6 +1148,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/il":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 # Return IL by view (hlil/mlil/llil) and optional SSA form
                 ident = params.get("name") or params.get("functionName") or params.get("address")
                 if not ident:
@@ -1037,19 +1170,19 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                 ssa = ssa_param in ("1", "true", "yes", "on")
 
                 try:
-                    func_info = self.binary_ops.get_function_info(ident)
+                    func_info = self.binary_ops.get_function_info(ident, view_id=view_id)
                     if not func_info:
                         self._send_json_response(
                             {
                                 "error": "Function not found",
                                 "requested": ident,
-                                "available_functions": self.binary_ops.get_function_names(0, 10),
+                                "available_functions": self.binary_ops.get_function_names(0, 10, view_id=view_id),
                             },
                             404,
                         )
                         return
 
-                    il_text = self.binary_ops.get_function_il(ident, view=view, ssa=ssa)
+                    il_text = self.binary_ops.get_function_il(ident, view=view, ssa=ssa, view_id=view_id)
                     if il_text is None:
                         self._send_json_response(
                             {
@@ -1080,6 +1213,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/functionAt":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address_str = params.get("address")
                 if not address_str:
                     self._send_json_response(
@@ -1100,7 +1237,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         offset = int(address_str)
 
                     # Add function to binary_operations.py
-                    function_names = self.binary_ops.get_functions_containing_address(offset)
+                    function_names = self.binary_ops.get_functions_containing_address(offset, view_id=view_id)
 
                     self._send_json_response({"address": hex(offset), "functions": function_names})
                 except ValueError:
@@ -1123,6 +1260,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/getUserDefinedType":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 type_name = params.get("name")
                 if not type_name:
                     self._send_json_response(
@@ -1137,7 +1278,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     # Get the user-defined type definition
-                    type_info = self.binary_ops.get_user_defined_type(type_name)
+                    type_info = self.binary_ops.get_user_defined_type(type_name, view_id=view_id)
 
                     if type_info:
                         self._send_json_response(type_info)
@@ -1146,15 +1287,16 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         available_types = {}
 
                         try:
+                            _bv = self.binary_ops._resolve_or_current(view_id)
                             if (
-                                hasattr(self.binary_ops._current_view, "user_type_container")
-                                and self.binary_ops._current_view.user_type_container
+                                hasattr(_bv, "user_type_container")
+                                and _bv.user_type_container
                             ):
                                 for (
                                     type_id
-                                ) in self.binary_ops._current_view.user_type_container.types.keys():
+                                ) in _bv.user_type_container.types.keys():
                                     current_type = (
-                                        self.binary_ops._current_view.user_type_container.types[
+                                        _bv.user_type_container.types[
                                             type_id
                                         ]
                                     )
@@ -1185,6 +1327,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/comment":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 if self.command == "GET":
                     address = params.get("address")
                     if not address:
@@ -1200,7 +1346,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         address_int = int(address, 16) if isinstance(address, str) else int(address)
-                        comment = self.binary_ops.get_comment(address_int)
+                        comment = self.binary_ops.get_comment(address_int, view_id=view_id)
                         if comment is not None:
                             self._send_json_response(
                                 {
@@ -1235,7 +1381,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         address_int = int(address, 16) if isinstance(address, str) else int(address)
-                        success = self.binary_ops.delete_comment(address_int)
+                        success = self.binary_ops.delete_comment(address_int, view_id=view_id)
                         if success:
                             self._send_json_response(
                                 {
@@ -1269,7 +1415,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         address_int = int(address, 16) if isinstance(address, str) else int(address)
-                        success = self.binary_ops.set_comment(address_int, comment)
+                        success = self.binary_ops.set_comment(address_int, comment, view_id=view_id)
                         if success:
                             self._send_json_response(
                                 {
@@ -1290,6 +1436,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         self._send_json_response({"error": "Invalid address format"}, 400)
 
             elif path == "/comment/function":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 if self.command == "GET":
                     function_name = params.get("name") or params.get("functionName")
                     if not function_name:
@@ -1303,7 +1453,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
-                    comment = self.binary_ops.get_function_comment(function_name)
+                    comment = self.binary_ops.get_function_comment(function_name, view_id=view_id)
                     if comment is not None:
                         self._send_json_response(
                             {
@@ -1334,7 +1484,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
-                    success = self.binary_ops.delete_function_comment(function_name)
+                    success = self.binary_ops.delete_function_comment(function_name, view_id=view_id)
                     if success:
                         self._send_json_response(
                             {
@@ -1364,7 +1514,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
-                    success = self.binary_ops.set_function_comment(function_name, comment)
+                    success = self.binary_ops.set_function_comment(function_name, comment, view_id=view_id)
                     if success:
                         self._send_json_response(
                             {
@@ -1383,6 +1533,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
 
             elif path == "/getComment":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address = params.get("address")
                 if not address:
                     self._send_json_response(
@@ -1397,7 +1551,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     address_int = int(address, 16) if isinstance(address, str) else int(address)
-                    comment = self.binary_ops.get_comment(address_int)
+                    comment = self.binary_ops.get_comment(address_int, view_id=view_id)
                     if comment is not None:
                         self._send_json_response(
                             {
@@ -1419,6 +1573,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": "Invalid address format"}, 400)
 
             elif path == "/getFunctionComment":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("name") or params.get("functionName")
                 if not function_name:
                     self._send_json_response(
@@ -1431,7 +1589,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
-                comment = self.binary_ops.get_function_comment(function_name)
+                comment = self.binary_ops.get_function_comment(function_name, view_id=view_id)
                 if comment is not None:
                     self._send_json_response(
                         {
@@ -1450,6 +1608,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         }
                     )
             elif path == "/setFunctionPrototype":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 # Accept both GET and POST to support long prototypes via POST body
                 address_str = (
                     params.get("address")
@@ -1470,7 +1632,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
                 try:
                     # Do minimal validation here; the endpoint will resolve name or address
-                    result = self.endpoints.set_function_prototype(address_str, proto)
+                    result = self.endpoints.set_function_prototype(address_str, proto, view_id=view_id)
                     self._send_json_response(result)
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
@@ -1478,6 +1640,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     bn.log_error(f"Error handling setFunctionPrototype request: {e}")
                     self._send_json_response({"error": str(e)}, 500)
             elif path == "/makeFunctionAt":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 # Create a function at an address (idempotent if already exists)
                 address_str = params.get("address") or params.get("addr")
                 arch = params.get("platform") or params.get("arch") or params.get("architecture")
@@ -1491,7 +1657,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    res = self.endpoints.make_function_at(address_str, arch)
+                    res = self.binary_ops.make_function_at(address_str, arch, view_id=view_id)
                     # If the endpoint signals an error, forward with 400 so clients can react properly
                     if isinstance(res, dict) and res.get("error"):
                         self._send_json_response(res, 400)
@@ -1509,6 +1675,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     bn.log_error(f"Error listing platforms: {e}")
                     self._send_json_response({"error": str(e)}, 500)
             elif path == "/setLocalVariableType":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 fn_ident = (
                     params.get("functionAddress")
                     or params.get("address")
@@ -1531,7 +1701,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    res = self.endpoints.set_local_variable_type(fn_ident, var_name, new_type)
+                    res = self.endpoints.set_local_variable_type(fn_ident, var_name, new_type, view_id=view_id)
                     self._send_json_response(res)
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
@@ -1539,6 +1709,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     bn.log_error(f"Error handling setLocalVariableType request: {e}")
                     self._send_json_response({"error": str(e)}, 500)
             elif path == "/retypeVariable":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("functionName")
                 if not function_name:
                     self._send_json_response({"error": "Missing function name parameter"}, 400)
@@ -1556,7 +1730,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     self._send_json_response(
-                        self.endpoints.retype_variable(function_name, variable_name, type_str)
+                        self.endpoints.retype_variable(function_name, variable_name, type_str, view_id=view_id)
                     )
                 except Exception as e:
                     bn.log_error(f"Error handling retypeVariable request: {e}")
@@ -1565,6 +1739,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         500,
                     )
             elif path == "/renameVariable":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("functionName")
                 if not function_name:
                     self._send_json_response({"error": "Missing function name parameter"}, 400)
@@ -1582,7 +1760,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     self._send_json_response(
-                        self.endpoints.rename_variable(function_name, variable_name, new_name)
+                        self.endpoints.rename_variable(function_name, variable_name, new_name, view_id=view_id)
                     )
                 except Exception as e:
                     bn.log_error(f"Error handling renameVariable request: {e}")
@@ -1592,6 +1770,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/renameVariables":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 # Batch rename local variables in a function
                 # Accept flexible identifiers and payload formats (GET/POST)
                 fn_ident = (
@@ -1653,7 +1835,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     return
 
                 try:
-                    result = self.endpoints.rename_variables(fn_ident, raw_renames)
+                    result = self.endpoints.rename_variables(fn_ident, raw_renames, view_id=view_id)
                     self._send_json_response(result)
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
@@ -1662,6 +1844,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getXrefsTo":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address_str = params.get("address")
                 if not address_str:
                     self._send_json_response(
@@ -1674,7 +1860,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    result = self.binary_ops.get_xrefs_to_address(address_str)
+                    result = self.binary_ops.get_xrefs_to_address(address_str, view_id=view_id)
                     self._send_json_response(result)
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
@@ -1683,6 +1869,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getXrefsToField":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 struct_name = params.get("struct") or params.get("structName")
                 field_name = params.get("field") or params.get("fieldName")
                 if not struct_name or not field_name:
@@ -1696,7 +1886,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    refs = self.binary_ops.get_xrefs_to_field(struct_name, field_name)
+                    refs = self.binary_ops.get_xrefs_to_field(struct_name, field_name, view_id=view_id)
                     self._send_json_response(
                         {"struct": struct_name, "field": field_name, "references": refs}
                     )
@@ -1705,6 +1895,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getXrefsToStruct":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 struct_name = params.get("name") or params.get("struct") or params.get("structName")
                 if not struct_name:
                     self._send_json_response(
@@ -1717,13 +1911,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    refs = self.binary_ops.get_xrefs_to_struct(struct_name)
+                    refs = self.binary_ops.get_xrefs_to_struct(struct_name, view_id=view_id)
                     self._send_json_response(refs)
                 except Exception as e:
                     bn.log_error(f"Error handling getXrefsToStruct: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getXrefsToType":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 type_name = params.get("name") or params.get("type") or params.get("typeName")
                 if not type_name:
                     self._send_json_response(
@@ -1736,13 +1934,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    refs = self.binary_ops.get_xrefs_to_type(type_name)
+                    refs = self.binary_ops.get_xrefs_to_type(type_name, view_id=view_id)
                     self._send_json_response(refs)
                 except Exception as e:
                     bn.log_error(f"Error handling getXrefsToType: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getTypeInfo":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 type_name = params.get("name") or params.get("type") or params.get("typeName")
                 if not type_name:
                     self._send_json_response(
@@ -1754,13 +1956,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    info = self.binary_ops.get_type_info(type_name)
+                    info = self.binary_ops.get_type_info(type_name, view_id=view_id)
                     self._send_json_response(info)
                 except Exception as e:
                     bn.log_error(f"Error handling getTypeInfo: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getXrefsToEnum":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 enum_name = params.get("name") or params.get("enum") or params.get("enumName")
                 if not enum_name:
                     self._send_json_response(
@@ -1773,7 +1979,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    refs = self.binary_ops.get_xrefs_to_enum(enum_name)
+                    refs = self.binary_ops.get_xrefs_to_enum(enum_name, view_id=view_id)
                     self._send_json_response(refs)
                 except Exception as e:
                     bn.log_error(f"Error handling getXrefsToEnum: {e}")
@@ -1782,6 +1988,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             # '/displayAs' endpoint removed per request
 
             elif path == "/formatValue":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 # Compute representations and annotate BN at an address
                 text = params.get("text")
                 size_param = params.get("size")
@@ -1827,7 +2037,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         parts.append(f"str={s}")
                     annot = "Converted: " + ", ".join(parts) if parts else f"Converted: {conv}"
 
-                    applied = self.binary_ops.set_comment(addr, annot)
+                    applied = self.binary_ops.set_comment(addr, annot, view_id=view_id)
                     self._send_json_response(
                         {
                             "address": hex(addr),
@@ -1862,6 +2072,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getXrefsToUnion":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 union_name = params.get("name") or params.get("union") or params.get("unionName")
                 if not union_name:
                     self._send_json_response(
@@ -1874,13 +2088,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    refs = self.binary_ops.get_xrefs_to_union(union_name)
+                    refs = self.binary_ops.get_xrefs_to_union(union_name, view_id=view_id)
                     self._send_json_response(refs)
                 except Exception as e:
                     bn.log_error(f"Error handling getXrefsToUnion: {e}")
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/getStackFrameVars":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_identifier = params.get("name") or params.get("address")
                 if not function_identifier:
                     self._send_json_response(
@@ -1892,7 +2110,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    result = self.endpoints.get_stack_frame_vars(function_identifier)
+                    result = self.endpoints.get_stack_frame_vars(function_identifier, view_id=view_id)
                     self._send_json_response({"stack_frame_vars": result})
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
@@ -1901,13 +2119,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/defineTypes":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 c_code = params.get("cCode")
                 if not c_code:
                     self._send_json_response({"error": "Missing cCode parameter"}, 400)
                     return
 
                 try:
-                    self._send_json_response(self.endpoints.define_types(c_code))
+                    self._send_json_response(self.endpoints.define_types(c_code, view_id=view_id))
                 except Exception as e:
                     bn.log_error(f"Error handling defineTypes request: {e}")
                     self._send_json_response(
@@ -1915,6 +2137,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         500,
                     )
             elif path == "/declareCType":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 c_decl = (
                     params.get("declaration")
                     or params.get("cDecl")
@@ -1931,13 +2157,17 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    self._send_json_response(self.endpoints.declare_c_type(c_decl))
+                    self._send_json_response(self.endpoints.declare_c_type(c_decl, view_id=view_id))
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
                 except Exception as e:
                     bn.log_error(f"Error handling declareCType request: {e}")
                     self._send_json_response({"error": str(e)}, 500)
             elif path == "/patch" or path == "/patchBytes":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address = params.get("address") or params.get("addr")
                 data = params.get("data") or params.get("bytes")
                 # Parse save_to_file parameter (default True for backwards compatibility)
@@ -1985,7 +2215,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                             # Not JSON, treat as hex string
                             pass
 
-                    result = self.endpoints.patch_bytes(address, data, save_to_file)
+                    result = self.endpoints.patch_bytes(address, data, save_to_file, view_id=view_id)
                     self._send_json_response(result)
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)
@@ -2016,34 +2246,35 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
             bn.log_error(f"Error handling GET request: {e}")
             self._send_json_response({"error": str(e)}, 500)
 
-    def _handle_decompile(self, function_name: str, lang: str = "hlil"):
+    def _handle_decompile(self, function_name: str, lang: str = "hlil", *, view_id: str | None = None):
         """Handle function decompilation requests.
 
         Args:
             function_name: Name or address of the function to decompile
             lang: Language representation — "hlil" (default, intrinsics preserved)
                   or "pseudoc" (C-like, may lose intrinsic details)
+            view_id: The view to operate on.
 
         Sends JSON response with either:
         - Decompiled function code and metadata
         - Error message with available functions list
         """
         try:
-            func_info = self.binary_ops.get_function_info(function_name)
+            func_info = self.binary_ops.get_function_info(function_name, view_id=view_id)
             if not func_info:
                 bn.log_error(f"Function not found: {function_name}")
                 self._send_json_response(
                     {
                         "error": "Function not found",
                         "requested_name": function_name,
-                        "available_functions": self.binary_ops.get_function_names(0, 10),
+                        "available_functions": self.binary_ops.get_function_names(0, 10, view_id=view_id),
                     },
                     404,
                 )
                 return
 
             bn.log_info(f"Found function for decompilation: {func_info}")
-            decompiled = self.binary_ops.decompile_function(function_name, lang=lang)
+            decompiled = self.binary_ops.decompile_function(function_name, lang=lang, view_id=view_id)
 
             if decompiled is None:
                 self._send_json_response(
@@ -2093,6 +2324,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": str(e)}, 500)
 
             elif path == "/rename/function" or path == "/renameFunction":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 old_name = params.get("oldName") or params.get("old_name")
                 new_name = params.get("newName") or params.get("new_name")
 
@@ -2131,10 +2366,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     bn.log_info(f"Applied prefix '{prefix}': {new_name}")
 
                 # Get function info for validation
-                func_info = self.binary_ops.get_function_info(old_name)
+                func_info = self.binary_ops.get_function_info(old_name, view_id=view_id)
                 if func_info:
                     bn.log_info(f"Found function: {func_info}")
-                    success = self.binary_ops.rename_function(old_name, new_name)
+                    success = self.binary_ops.rename_function(old_name, new_name, view_id=view_id)
                     if success:
                         self._send_json_response(
                             {
@@ -2153,7 +2388,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                             500,
                         )
                 else:
-                    available_funcs = self.binary_ops.get_function_names(0, 10)
+                    available_funcs = self.binary_ops.get_function_names(0, 10, view_id=view_id)
                     bn.log_error(f"Function not found: {old_name}")
                     self._send_json_response(
                         {
@@ -2166,6 +2401,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/rename/data" or path == "/renameData":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address = params.get("address")
                 new_name = params.get("newName") or params.get("new_name")
                 if not address or not new_name:
@@ -2174,12 +2413,16 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     address_int = int(address, 16) if isinstance(address, str) else int(address)
-                    success = self.binary_ops.rename_data(address_int, new_name)
+                    success = self.binary_ops.rename_data(address_int, new_name, view_id=view_id)
                     self._send_json_response({"success": success})
                 except ValueError:
                     self._send_json_response({"error": "Invalid address format"}, 400)
 
             elif path == "/comment":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 if self.command == "GET":
                     address = params.get("address")
                     if not address:
@@ -2195,7 +2438,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         address_int = int(address, 16) if isinstance(address, str) else int(address)
-                        comment = self.binary_ops.get_comment(address_int)
+                        comment = self.binary_ops.get_comment(address_int, view_id=view_id)
                         if comment is not None:
                             self._send_json_response(
                                 {
@@ -2230,7 +2473,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         address_int = int(address, 16) if isinstance(address, str) else int(address)
-                        success = self.binary_ops.delete_comment(address_int)
+                        success = self.binary_ops.delete_comment(address_int, view_id=view_id)
                         if success:
                             self._send_json_response(
                                 {
@@ -2264,7 +2507,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                     try:
                         address_int = int(address, 16) if isinstance(address, str) else int(address)
-                        success = self.binary_ops.set_comment(address_int, comment)
+                        success = self.binary_ops.set_comment(address_int, comment, view_id=view_id)
                         if success:
                             self._send_json_response(
                                 {
@@ -2285,6 +2528,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         self._send_json_response({"error": "Invalid address format"}, 400)
 
             elif path == "/comment/function":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 if self.command == "GET":
                     function_name = params.get("name") or params.get("functionName")
                     if not function_name:
@@ -2298,7 +2545,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
-                    comment = self.binary_ops.get_function_comment(function_name)
+                    comment = self.binary_ops.get_function_comment(function_name, view_id=view_id)
                     if comment is not None:
                         self._send_json_response(
                             {
@@ -2329,7 +2576,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
-                    success = self.binary_ops.delete_function_comment(function_name)
+                    success = self.binary_ops.delete_function_comment(function_name, view_id=view_id)
                     if success:
                         self._send_json_response(
                             {
@@ -2359,7 +2606,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
                         return
 
-                    success = self.binary_ops.set_function_comment(function_name, comment)
+                    success = self.binary_ops.set_function_comment(function_name, comment, view_id=view_id)
                     if success:
                         self._send_json_response(
                             {
@@ -2378,6 +2625,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                         )
 
             elif path == "/getComment":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address = params.get("address")
                 if not address:
                     self._send_json_response(
@@ -2392,7 +2643,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
 
                 try:
                     address_int = int(address, 16) if isinstance(address, str) else int(address)
-                    comment = self.binary_ops.get_comment(address_int)
+                    comment = self.binary_ops.get_comment(address_int, view_id=view_id)
                     if comment is not None:
                         self._send_json_response(
                             {
@@ -2414,6 +2665,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     self._send_json_response({"error": "Invalid address format"}, 400)
 
             elif path == "/getFunctionComment":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 function_name = params.get("functionName") or params.get("name")
                 if not function_name:
                     self._send_json_response(
@@ -2426,7 +2681,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
                     return
 
-                comment = self.binary_ops.get_function_comment(function_name)
+                comment = self.binary_ops.get_function_comment(function_name, view_id=view_id)
                 if comment is not None:
                     self._send_json_response(
                         {
@@ -2446,6 +2701,10 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                     )
 
             elif path == "/patch" or path == "/patchBytes":
+                view_id = params.get("view_id")
+                if not view_id:
+                    self._send_json_response({"error": "view_id required"}, 400)
+                    return
                 address = params.get("address") or params.get("addr")
                 data = params.get("data") or params.get("bytes")
                 # Parse save_to_file parameter (default True for backwards compatibility)
@@ -2493,7 +2752,7 @@ class MCPRequestHandler(BaseHTTPRequestHandler):
                             # Not JSON, treat as hex string
                             pass
 
-                    result = self.endpoints.patch_bytes(address, data, save_to_file)
+                    result = self.endpoints.patch_bytes(address, data, save_to_file, view_id=view_id)
                     self._send_json_response(result)
                 except ValueError as ve:
                     self._send_json_response({"error": str(ve)}, 400)

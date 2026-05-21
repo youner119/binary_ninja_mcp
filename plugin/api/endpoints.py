@@ -129,15 +129,14 @@ class BinaryNinjaEndpoints:
         """Proxy BinaryOperations.get_callees for endpoint reuse."""
         return self.binary_ops.get_callees(identifiers)
 
-    def get_imports(self, offset: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    def get_imports(
+        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get list of imported functions"""
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         imports = []
-        for sym in self.binary_ops.current_view.get_symbols_of_type(
-            bn.SymbolType.ImportedFunctionSymbol
-        ):
+        for sym in bv.get_symbols_of_type(bn.SymbolType.ImportedFunctionSymbol):
             imports.append(
                 {
                     "name": sym.name,
@@ -148,13 +147,14 @@ class BinaryNinjaEndpoints:
             )
         return imports[offset : offset + limit]
 
-    def get_exports(self, offset: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    def get_exports(
+        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get list of exported symbols"""
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         exports = []
-        for sym in self.binary_ops.current_view.get_symbols():
+        for sym in bv.get_symbols():
             if sym.type not in [
                 bn.SymbolType.ImportedFunctionSymbol,
                 bn.SymbolType.ExternalSymbol,
@@ -170,13 +170,14 @@ class BinaryNinjaEndpoints:
                 )
         return exports[offset : offset + limit]
 
-    def get_namespaces(self, offset: int = 0, limit: int = 100) -> list[str]:
+    def get_namespaces(
+        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+    ) -> list[str]:
         """Get list of C++ namespaces"""
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         namespaces = set()
-        for sym in self.binary_ops.current_view.get_symbols():
+        for sym in bv.get_symbols():
             if "::" in sym.name:
                 parts = sym.name.split("::")
                 if len(parts) > 1:
@@ -186,25 +187,26 @@ class BinaryNinjaEndpoints:
         sorted_namespaces = sorted(list(namespaces))
         return sorted_namespaces[offset : offset + limit]
 
-    def get_defined_data(self, offset: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    def get_defined_data(
+        self, offset: int = 0, limit: int = 100, *, view_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get list of defined data variables"""
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         data_items = []
-        for var in self.binary_ops.current_view.data_vars:
-            data_type = self.binary_ops.current_view.get_type_at(var)
+        for var in bv.data_vars:
+            data_type = bv.get_type_at(var)
             value = None
 
             try:
                 if data_type and data_type.width <= 8:
-                    value = str(self.binary_ops.current_view.read_int(var, data_type.width))
+                    value = str(bv.read_int(var, data_type.width))
                 else:
                     value = "(complex data)"
             except (ValueError, TypeError):
                 value = "(unreadable)"
 
-            sym = self.binary_ops.current_view.get_symbol_at(var)
+            sym = bv.get_symbol_at(var)
             data_items.append(
                 {
                     "address": hex(var),
@@ -218,17 +220,21 @@ class BinaryNinjaEndpoints:
         return data_items[offset : offset + limit]
 
     def search_functions(
-        self, search_term: str, offset: int = 0, limit: int = 100
+        self,
+        search_term: str,
+        offset: int = 0,
+        limit: int = 100,
+        *,
+        view_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Search functions by name"""
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         if not search_term:
             return []
 
         matches = []
-        for func in self.binary_ops.current_view.functions:
+        for func in bv.functions:
             if search_term.lower() in func.name.lower():
                 matches.append(
                     {
@@ -351,7 +357,7 @@ class BinaryNinjaEndpoints:
                 ]
             return {"error": str(e), "available_platforms": platforms}
 
-    def define_types(self, c_code: str) -> dict[str, str]:
+    def define_types(self, c_code: str, *, view_id: str | None = None) -> dict[str, str]:
         """Define types from C code string
 
         Args:
@@ -364,24 +370,30 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If parsing the types fails
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         try:
             # Parse the C code string to get type objects
-            parse_result = self.binary_ops.current_view.parse_types_from_string(c_code)
+            parse_result = bv.parse_types_from_string(c_code)
 
             # Define each type in the binary view
             defined_types = {}
             for name, type_obj in parse_result.types.items():
-                self.binary_ops.current_view.define_user_type(name, type_obj)
+                bv.define_user_type(name, type_obj)
                 defined_types[str(name)] = str(type_obj)
 
             return defined_types
         except Exception as e:
             raise ValueError(f"Failed to define types: {e!s}")
 
-    def rename_variable(self, function_name: str, old_name: str, new_name: str) -> dict[str, str]:
+    def rename_variable(
+        self,
+        function_name: str,
+        old_name: str,
+        new_name: str,
+        *,
+        view_id: str | None = None,
+    ) -> dict[str, str]:
         """Rename a variable inside a function
 
         Args:
@@ -396,11 +408,12 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If the function is not found or variable cannot be renamed
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        self.binary_ops._resolve_or_current(view_id)
 
         # Find the function by name
-        function = self.binary_ops.get_function_by_name_or_address(function_name)
+        function = self.binary_ops.get_function_by_name_or_address(
+            function_name, view_id=view_id
+        )
         if not function:
             raise ValueError(f"Function '{function_name}' not found")
 
@@ -422,6 +435,8 @@ class BinaryNinjaEndpoints:
         self,
         function_identifier: str | int,
         renames: list[dict[str, str]] | dict[str, str],
+        *,
+        view_id: str | None = None,
     ) -> dict[str, Any]:
         """Rename multiple local variables in a function.
 
@@ -436,11 +451,12 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If the function is not found or inputs are invalid
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        self.binary_ops._resolve_or_current(view_id)
 
         # Resolve function first
-        func = self.binary_ops.get_function_by_name_or_address(function_identifier)
+        func = self.binary_ops.get_function_by_name_or_address(
+            function_identifier, view_id=view_id
+        )
         if not func:
             raise ValueError(f"Function '{function_identifier}' not found")
 
@@ -579,7 +595,14 @@ class BinaryNinjaEndpoints:
             "results": results,
         }
 
-    def retype_variable(self, function_name: str, name: str, type_str: str) -> dict[str, str]:
+    def retype_variable(
+        self,
+        function_name: str,
+        name: str,
+        type_str: str,
+        *,
+        view_id: str | None = None,
+    ) -> dict[str, str]:
         """Retype a variable inside a function
 
         Args:
@@ -594,11 +617,12 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If the function is not found or variable cannot be retyped
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        self.binary_ops._resolve_or_current(view_id)
 
         # Find the function by name
-        function = self.binary_ops.get_function_by_name_or_address(function_name)
+        function = self.binary_ops.get_function_by_name_or_address(
+            function_name, view_id=view_id
+        )
         if not function:
             raise ValueError(f"Function '{function_name}' not found")
 
@@ -616,7 +640,13 @@ class BinaryNinjaEndpoints:
         except Exception as e:
             raise ValueError(f"Failed to rename variable: {e!s}")
 
-    def set_function_prototype(self, function_address: str | int, prototype: str) -> dict[str, str]:
+    def set_function_prototype(
+        self,
+        function_address: str | int,
+        prototype: str,
+        *,
+        view_id: str | None = None,
+    ) -> dict[str, str]:
         """Set a function's prototype by address.
 
         Args:
@@ -630,11 +660,12 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded.
             ValueError: If the function or prototype is invalid.
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         # Resolve function by name or address; do not auto-create if missing
-        func = self.binary_ops.get_function_by_name_or_address(function_address)
+        func = self.binary_ops.get_function_by_name_or_address(
+            function_address, view_id=view_id
+        )
         if not func:
             raise ValueError(f"Function not found for identifier '{function_address}'")
 
@@ -647,7 +678,7 @@ class BinaryNinjaEndpoints:
         t = None
         last_error = None
         try:
-            t, _ = self.binary_ops.current_view.parse_type_string(proto)
+            t, _ = bv.parse_type_string(proto)
         except Exception as e:
             last_error = e
             t = None
@@ -655,7 +686,7 @@ class BinaryNinjaEndpoints:
         # Fallback 1: parse a declaration block and grab any function type
         if t is None:
             try:
-                pr = self.binary_ops.current_view.parse_types_from_string(proto)
+                pr = bv.parse_types_from_string(proto)
                 if pr and getattr(pr, "types", None):
                     # Prefer an entry matching the current function name
                     chosen = None
@@ -690,7 +721,7 @@ class BinaryNinjaEndpoints:
                 args = m.group(2).strip()
                 candidate = f"{ret} {func.name}({args})"
                 try:
-                    t, _ = self.binary_ops.current_view.parse_type_string(candidate)
+                    t, _ = bv.parse_type_string(candidate)
                 except Exception as e:
                     last_error = e
 
@@ -711,7 +742,9 @@ class BinaryNinjaEndpoints:
             "applied_type": str(t),
         }
 
-    def declare_c_type(self, c_declaration: str) -> dict[str, Any]:
+    def declare_c_type(
+        self, c_declaration: str, *, view_id: str | None = None
+    ) -> dict[str, Any]:
         """Create or update a local type from a single C declaration.
 
         Accepts any C type declaration (struct/union/enum/typedef/function type) and defines
@@ -730,15 +763,14 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If parsing fails or no types are found
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
         decl = (c_declaration or "").strip()
         if not decl:
             raise ValueError("Empty C declaration")
 
         try:
-            result = self.binary_ops.current_view.parse_types_from_string(decl)
+            result = bv.parse_types_from_string(decl)
         except Exception as e:
             raise ValueError(f"Failed to parse declaration: {e!s}")
 
@@ -748,7 +780,7 @@ class BinaryNinjaEndpoints:
         defined: dict[str, str] = {}
         for name, type_obj in result.types.items():
             try:
-                self.binary_ops.current_view.define_user_type(name, type_obj)
+                bv.define_user_type(name, type_obj)
                 defined[str(name)] = str(type_obj)
             except Exception as e:
                 raise ValueError(f"Failed to define type '{name}': {e!s}")
@@ -756,7 +788,12 @@ class BinaryNinjaEndpoints:
         return {"defined_types": defined, "count": len(defined)}
 
     def set_local_variable_type(
-        self, function_address: str | int, variable_name: str, new_type: str
+        self,
+        function_address: str | int,
+        variable_name: str,
+        new_type: str,
+        *,
+        view_id: str | None = None,
     ) -> dict[str, str]:
         """Set a local variable's type in a function.
 
@@ -772,10 +809,11 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If function/variable/type are invalid
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
+        bv = self.binary_ops._resolve_or_current(view_id)
 
-        func = self.binary_ops.get_function_by_name_or_address(function_address)
+        func = self.binary_ops.get_function_by_name_or_address(
+            function_address, view_id=view_id
+        )
         if not func:
             raise ValueError(f"Function '{function_address}' not found")
 
@@ -795,7 +833,7 @@ class BinaryNinjaEndpoints:
 
         # Parse type string
         try:
-            t, _ = self.binary_ops.current_view.parse_type_string((new_type or "").strip())
+            t, _ = bv.parse_type_string((new_type or "").strip())
         except Exception:
             t = None
         if t is None:
@@ -834,7 +872,12 @@ class BinaryNinjaEndpoints:
             "applied_type": applied,
         }
 
-    def get_stack_frame_vars(self, function_identifier: str | int) -> list[dict[str, Any]]:
+    def get_stack_frame_vars(
+        self,
+        function_identifier: str | int,
+        *,
+        view_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Get stack frame variable information for a function.
 
         Returns information about local variables in the function's stack frame,
@@ -869,11 +912,12 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If the function is not found
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
-        self.binary_ops.ensure_analysis_ready()
+        bv = self.binary_ops._resolve_or_current(view_id)
+        self.binary_ops.ensure_analysis_ready(bv)
 
-        func = self.binary_ops.get_function_by_name_or_address(function_identifier)
+        func = self.binary_ops.get_function_by_name_or_address(
+            function_identifier, view_id=view_id
+        )
         if not func:
             raise ValueError(f"Function '{function_identifier}' not found")
 
@@ -937,7 +981,12 @@ class BinaryNinjaEndpoints:
     # display_as removed per request
 
     def patch_bytes(
-        self, address: str | int, data: str | bytes | list[int], save_to_file: bool = True
+        self,
+        address: str | int,
+        data: str | bytes | list[int],
+        save_to_file: bool = True,
+        *,
+        view_id: str | None = None,
     ) -> dict[str, Any]:
         """Patch bytes at a given address in the binary.
 
@@ -957,11 +1006,8 @@ class BinaryNinjaEndpoints:
             RuntimeError: If no binary is loaded
             ValueError: If address or data format is invalid
         """
-        if not self.binary_ops.current_view:
-            raise RuntimeError("No binary loaded")
-
         try:
-            return self.binary_ops.patch_bytes(address, data, save_to_file)
+            return self.binary_ops.patch_bytes(address, data, save_to_file, view_id=view_id)
         except Exception as e:
             bn.log_error(f"Error patching bytes: {e}")
             raise ValueError(f"Failed to patch bytes: {e!s}")
