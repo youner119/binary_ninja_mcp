@@ -5,7 +5,8 @@ This is the TypeScript implementation of the Binary Ninja MCP bridge server. It 
 ## Features
 
 - **Standalone MCP Server**: Run independently with any MCP client
-- **60+ Tools**: Full access to Binary Ninja's reverse engineering capabilities
+- **59 Tools**: Full access to Binary Ninja's reverse engineering capabilities
+- **Multi-session**: Manage multiple open binaries simultaneously via user-assigned `view_id` aliases
 - **Easy Configuration**: CLI options and environment variables for host/port
 - **TypeScript**: Full type safety and better developer experience
 
@@ -103,15 +104,25 @@ If installed globally:
 
 ## Available Tools
 
+All analysis tools require an explicit `view_id` matching a view created via `create_view`. Use `list_view` to see currently registered views.
+
+### View Management Tools (no `view_id` required)
+
+- `create_view` - Load a binary file and register it under a user-assigned `view_id` alias. Returns 409 if the `view_id` already exists or the filepath is already loaded under another alias.
+- `list_view` - List all currently registered views with `view_id`, filepath, basename, arch, and `analysis_state` for each.
+- `delete_view` - Close and unregister a view by `view_id`. WARNING: unsaved analysis is lost — call `save_bndb` first.
+- `list_platforms` - List available platform names (global)
+- `convert_number` - Convert number representations (global)
+
 ### Function Analysis
 
 - `list_methods` - List all function names with pagination
-- `get_entry_points` - List entry point(s) of the loaded binary
+- `get_entry_points` - List entry point(s) of the binary in the given view
 - `search_functions_by_name` - Search functions by name substring
-- `decompile_function` - Decompile a function (HLIL by default; Pseudo C also available via the `/decompile` endpoint's `lang` parameter)
+- `decompile_function` - Decompile a function (HLIL/Pseudo C representation)
 - `decompile_to_file` - Decompile a function and write the full pseudocode directly to a file on disk
 - `batch_decompile_to_file` - Decompile every non-imported, non-thunk function and save each as `<output_dir>/<name>.txt`
-- `save_bndb` - Save the current analysis state as a `.bndb` database file
+- `save_bndb` - Save the analysis state of the given view as a `.bndb` database file
 - `get_il` - Get IL (HLIL/MLIL/LLIL) for a function
 - `fetch_disassembly` - Get assembly mnemonics for a function
 
@@ -164,7 +175,6 @@ If installed globally:
 
 - `set_function_prototype` - Set function prototype
 - `make_function_at` - Create function at address
-- `list_platforms` - List available platforms
 - `patch_bytes` - Patch bytes in binary
 
 ### Utility Tools
@@ -180,12 +190,7 @@ If installed globally:
 - `list_strings` - List strings
 - `list_strings_filter` - List strings filtered by substring (paginated)
 - `list_all_strings` - List all strings (aggregated)
-- `get_binary_status` - Get binary status
-- `load_binary` - Load a binary or `.bndb` file from an absolute path
-- `list_binaries` - List open binaries
-- `select_binary` - Select active binary
 - `format_value` - Format and annotate value
-- `convert_number` - Convert number representations
 
 ## Requirements
 
