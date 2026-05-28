@@ -28,3 +28,10 @@ Desktop.ini
 .mcp_auto_setup_done
 
 bridge/node_modules
+
+# OmP fork context — track curated artifacts, exclude ephemeral OMC tooling state
+# (HUD cache, session dumps, ralph state, etc. that may leak in from OMC usage)
+.omc/state/*
+!.omc/state/current-task.md
+!.omc/state/prev-task.md
+
